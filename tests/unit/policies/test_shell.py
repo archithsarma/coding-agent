@@ -49,6 +49,12 @@ def test_shell_policy_allows_approved_commands(argv: list[str]) -> None:
         ["unknown-tool"],
         ["git", "commit"],
         ["git", "reset"],
+        ["git", "-C", ".", "status"],
+        ["git", "--git-dir", ".git", "status"],
+        ["git", "-c", "core.sshCommand=unsafe", "status"],
+        ["git", "diff", "--output", "outside.txt"],
+        ["git", "diff", "--no-index", "a", "b"],
+        ["git", "status", "--porcelain"],
         ["ruff", "format"],
     ],
 )
@@ -91,6 +97,26 @@ def test_shell_policy_rejects_cwd_escape(tmp_path) -> None:
                     call_id="1",
                     capability="shell.execute",
                     arguments={"argv": ["pytest"], "cwd": "../outside"},
+                ),
+            )
+        )
+
+
+def test_shell_policy_rejects_symlink_cwd_escape(tmp_path) -> None:
+    outside = tmp_path.parent / "shell-policy-outside"
+    outside.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    policy = ShellCommandPolicy(path_policy=WorkspacePathPolicy(tmp_path))
+
+    with pytest.raises(PolicyViolationError):
+        asyncio.run(
+            policy.validate(
+                descriptor(),
+                ToolRequest(
+                    call_id="1",
+                    capability="shell.execute",
+                    arguments={"argv": ["pytest"], "cwd": "link"},
                 ),
             )
         )

@@ -87,6 +87,7 @@ class ShellCommandExecutor:
             raise ShellProcessError("approved command could not be started") from error
 
         if process.stdout is None or process.stderr is None:  # pragma: no cover
+            await self._terminate_and_reap(process)
             raise ShellProcessError("shell process did not expose output streams")
         stdout_task = asyncio.create_task(
             _read_limited(process.stdout, self._max_stdout_bytes)
@@ -108,6 +109,10 @@ class ShellCommandExecutor:
                 await asyncio.shield(_await_output(stdout_task, stderr_task))
                 raise
             stdout, stderr = await _await_output(stdout_task, stderr_task)
+        except BaseException:
+            await asyncio.shield(self._terminate_and_reap(process))
+            await asyncio.shield(_await_output(stdout_task, stderr_task))
+            raise
         finally:
             if not stdout_task.done() or not stderr_task.done():
                 await _await_output(stdout_task, stderr_task)
@@ -117,8 +122,8 @@ class ShellCommandExecutor:
             argv=invocation.argv,
             cwd=invocation.cwd,
             exit_code=process.returncode if process.returncode is not None else -1,
-            stdout=stdout[0].decode("utf-8", errors="replace"),
-            stderr=stderr[0].decode("utf-8", errors="replace"),
+            stdout=_decode_bounded(stdout[0], self._max_stdout_bytes),
+            stderr=_decode_bounded(stderr[0], self._max_stderr_bytes),
             duration_ms=duration_ms,
             timed_out=timed_out,
             stdout_truncated=stdout[1],
@@ -129,7 +134,10 @@ class ShellCommandExecutor:
         if process.returncode is not None:
             return
         if os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         else:  # pragma: no cover - target environment is Unix
             process.terminate()
         try:
@@ -141,7 +149,10 @@ class ShellCommandExecutor:
             pass
         if process.returncode is None:
             if os.name == "posix":
-                os.killpg(process.pid, signal.SIGKILL)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             else:  # pragma: no cover - target environment is Unix
                 process.kill()
             await process.wait()
@@ -160,6 +171,13 @@ async def _read_limited(stream: asyncio.StreamReader, limit: int) -> tuple[bytes
         if len(chunk) > max(remaining, 0):
             truncated = True
     return bytes(captured), truncated
+
+
+def _decode_bounded(data: bytes, limit: int) -> str:
+    text = data.decode("utf-8", errors="replace")
+    while len(text.encode("utf-8")) > limit:
+        text = text[:-1]
+    return text
 
 
 async def _await_output(

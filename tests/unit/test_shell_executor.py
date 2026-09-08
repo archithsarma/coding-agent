@@ -77,3 +77,50 @@ def test_executor_bounds_each_output_stream(tmp_path: Path) -> None:
     assert len(result.stderr.encode()) == 8
     assert result.stdout_truncated is True
     assert result.stderr_truncated is True
+
+
+def test_executor_keeps_multibyte_output_within_byte_limit(tmp_path: Path) -> None:
+    executor = ShellCommandExecutor(max_stdout_bytes=4)
+    result = run(
+        executor.execute(
+            ShellInvocation(
+                argv=(sys.executable, "-c", "print('ééé', end='')"),
+                cwd=".",
+                timeout_seconds=2,
+            ),
+            cwd=tmp_path,
+        )
+    )
+
+    assert len(result.stdout.encode()) <= 4
+    assert result.stdout_truncated is True
+
+
+def test_executor_cancellation_reaps_the_process(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        executor = ShellCommandExecutor(termination_grace_seconds=0.05)
+        task = asyncio.create_task(
+            executor.execute(
+                ShellInvocation(
+                    argv=(sys.executable, "-c", "import time; time.sleep(10)"),
+                    cwd=".",
+                    timeout_seconds=30,
+                ),
+                cwd=tmp_path,
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2)
+        except asyncio.CancelledError:
+            pass
+
+    run(scenario())
+
+
+def test_execution_environment_excludes_unapproved_variables(monkeypatch) -> None:
+    monkeypatch.setenv("SECRET_SHOULD_NOT_CROSS_BOUNDARY", "hidden")
+    from coding_agent.mcp_servers.shell import _execution_environment
+
+    assert "SECRET_SHOULD_NOT_CROSS_BOUNDARY" not in _execution_environment()
