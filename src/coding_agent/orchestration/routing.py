@@ -82,7 +82,7 @@ def route_request(request: str) -> RoutingDecision:
             reason="explicit verification request",
         )
     if normalized in _EXPLORE_EXACT or normalized.startswith(
-        ("what does ", "show me how ", "where is ")
+        ("what does ", "show me how ", "where is ", "how are ", "how is ")
     ):
         return RoutingDecision(
             trajectory=Trajectory.EXPLORE,

@@ -42,6 +42,7 @@ def plan_verification(request: str) -> VerificationCommand | None:
     normalized = normalize_request(request)
     commands = {
         "run tests": VerificationCommand(VerificationKind.TEST, ("pytest",)),
+        "run the tests": VerificationCommand(VerificationKind.TEST, ("pytest",)),
         "run pytest": VerificationCommand(VerificationKind.TEST, ("pytest",)),
         "check lint": VerificationCommand(
             VerificationKind.LINT, ("ruff", "check", ".")

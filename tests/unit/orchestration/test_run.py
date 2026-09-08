@@ -78,6 +78,7 @@ async def run(request: str, runtime, *, execution_budget=None):
     ("intent", "kind", "argv"),
     [
         ("run tests", VerificationKind.TEST, ("pytest",)),
+        ("run the tests", VerificationKind.TEST, ("pytest",)),
         ("run pytest", VerificationKind.TEST, ("pytest",)),
         ("check lint", VerificationKind.LINT, ("ruff", "check", ".")),
         ("run lint", VerificationKind.LINT, ("ruff", "check", ".")),

@@ -20,6 +20,7 @@ from coding_agent.orchestration.routing import route_request
         ("what files are in this project?", Trajectory.EXPLORE),
         ("what does create_task do?", Trajectory.EXPLORE),
         ("show me how tasks are created", Trajectory.EXPLORE),
+        ("how are tasks created?", Trajectory.EXPLORE),
     ],
 )
 def test_high_confidence_requests_route(
