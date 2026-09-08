@@ -5,6 +5,7 @@ from typing import TypeVar
 
 import pytest
 
+from coding_agent.content import sha256_text
 from coding_agent.domain import (
     InvalidRequestError,
     PolicyViolationError,
@@ -33,6 +34,7 @@ class FakeMcpConnection:
             "read_text_file",
             "list_directory",
             "get_file_info",
+            "write_file",
         ),
     ) -> None:
         self.call_result = call_result
@@ -75,6 +77,7 @@ def make_adapter(
         connection,
         path_policy=WorkspacePathPolicy(tmp_path),
         max_read_bytes=max_read_bytes,
+        max_write_bytes=100,
         operation_timeout_seconds=0.1,
     )
 
@@ -90,6 +93,7 @@ def result_map(
         or McpCallResult(False, (), {"content": "[FILE] main.py"}),
         "get_file_info": metadata or McpCallResult(False, (), {"content": "size: 1"}),
         "read_text_file": reading or McpCallResult(False, (), {"content": "ok"}),
+        "write_file": McpCallResult(False, (), {"content": "written"}),
     }
 
 
@@ -107,7 +111,7 @@ def invoke_read(adapter: FilesystemMcpAdapter, path: str = "main.py") -> ToolRes
     return run(scenario())
 
 
-def test_adapter_registers_only_read_and_list_capabilities(tmp_path: Path) -> None:
+def test_adapter_registers_read_list_and_write_capabilities(tmp_path: Path) -> None:
     adapter = make_adapter(tmp_path, FakeMcpConnection(call_results=result_map()))
 
     async def scenario() -> tuple[str, ...]:
@@ -116,7 +120,11 @@ def test_adapter_registers_only_read_and_list_capabilities(tmp_path: Path) -> No
             adapter.register_tools(registry)
             return tuple(d.capability for d in registry.list_descriptors())
 
-    assert run(scenario()) == ("filesystem.list", "filesystem.read")
+    assert run(scenario()) == (
+        "filesystem.list",
+        "filesystem.read",
+        "filesystem.write",
+    )
 
 
 def test_adapter_normalizes_list_and_read_results(tmp_path: Path) -> None:
@@ -167,6 +175,72 @@ def test_adapter_normalizes_list_and_read_results(tmp_path: Path) -> None:
     }
     assert reading.success is True
     assert reading.data == {"path": "main.py", "content": "print('ok')"}
+
+
+def test_adapter_normalizes_write_and_enforces_expected_hash(tmp_path: Path) -> None:
+    connection = FakeMcpConnection(
+        call_results=result_map(
+            reading=McpCallResult(False, (), {"content": "before\n"}),
+        )
+    )
+    adapter = make_adapter(tmp_path, connection)
+
+    async def scenario() -> ToolResult:
+        async with adapter:
+            registry = ToolRegistry()
+            adapter.register_tools(registry)
+            return await ToolRuntime(registry).invoke(
+                ToolRequest(
+                    call_id="write",
+                    capability="filesystem.write",
+                    arguments={
+                        "path": "main.py",
+                        "content": "after\n",
+                        "expected_sha256": sha256_text("before\n"),
+                    },
+                )
+            )
+
+    result = run(scenario())
+    assert result.success
+    assert result.data == {"path": "main.py", "bytes_written": 6}
+    assert [name for name, _ in connection.calls] == [
+        "get_file_info",
+        "read_text_file",
+        "write_file",
+    ]
+
+
+def test_adapter_write_rejects_hash_conflict_without_writing(tmp_path: Path) -> None:
+    connection = FakeMcpConnection(
+        call_results=result_map(
+            reading=McpCallResult(False, (), {"content": "current\n"}),
+        )
+    )
+    adapter = make_adapter(tmp_path, connection)
+
+    async def scenario() -> ToolResult:
+        async with adapter:
+            registry = ToolRegistry()
+            adapter.register_tools(registry)
+            return await ToolRuntime(registry).invoke(
+                ToolRequest(
+                    call_id="write",
+                    capability="filesystem.write",
+                    arguments={
+                        "path": "main.py",
+                        "content": "after\n",
+                        "expected_sha256": sha256_text("before\n"),
+                    },
+                )
+            )
+
+    result = run(scenario())
+    assert result.error is not None and result.error.code == "operation_conflict"
+    assert [name for name, _ in connection.calls] == [
+        "get_file_info",
+        "read_text_file",
+    ]
 
 
 def test_adapter_normalizes_mcp_errors_malformed_responses_and_timeouts(
@@ -321,4 +395,15 @@ def test_missing_metadata_tool_fails_initialization(tmp_path: Path) -> None:
         tmp_path, FakeMcpConnection(tool_names=("read_text_file", "list_directory"))
     )
     with pytest.raises(McpToolUnavailableError, match="get_file_info"):
+        run(adapter.__aenter__())
+
+
+def test_missing_write_tool_fails_initialization(tmp_path: Path) -> None:
+    adapter = make_adapter(
+        tmp_path,
+        FakeMcpConnection(
+            tool_names=("read_text_file", "list_directory", "get_file_info")
+        ),
+    )
+    with pytest.raises(McpToolUnavailableError, match="write_file"):
         run(adapter.__aenter__())

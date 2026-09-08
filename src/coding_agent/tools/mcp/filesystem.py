@@ -1,10 +1,11 @@
-"""Read-only filesystem tools backed by the official MCP filesystem server."""
+"""Filesystem tools backed by the official MCP filesystem server."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from coding_agent.content import sha256_text
 from coding_agent.domain import (
     InvalidRequestError,
     ToolRequest,
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 
 class FilesystemMcpAdapter(McpAdapter):
     required_external_tools = frozenset(
-        {"read_text_file", "list_directory", "get_file_info"}
+        {"read_text_file", "list_directory", "get_file_info", "write_file"}
     )
 
     def __init__(
@@ -35,6 +36,7 @@ class FilesystemMcpAdapter(McpAdapter):
         *,
         path_policy: WorkspacePathPolicy,
         max_read_bytes: int,
+        max_write_bytes: int,
         operation_timeout_seconds: float,
     ) -> None:
         super().__init__(
@@ -42,9 +44,16 @@ class FilesystemMcpAdapter(McpAdapter):
         )
         self._path_policy = path_policy
         self._max_read_bytes = max_read_bytes
+        if max_write_bytes <= 0:
+            raise ValueError("max_write_bytes must be greater than zero")
+        self._max_write_bytes = max_write_bytes
 
     def _build_tools(self) -> tuple[InternalTool, ...]:
-        return (_FilesystemListTool(self), _FilesystemReadTool(self))
+        return (
+            _FilesystemListTool(self),
+            _FilesystemReadTool(self),
+            _FilesystemWriteTool(self),
+        )
 
     def resolve_path(self, request: ToolRequest) -> tuple[str, Path]:
         raw_path = request.arguments.get("path")
@@ -143,6 +152,86 @@ class _FilesystemReadTool:
             call_id=request.call_id,
             success=True,
             data={"path": raw_path, "content": text},
+        )
+
+
+class _FilesystemWriteTool:
+    descriptor = ToolDescriptor(
+        tool_name="filesystem-write",
+        capability="filesystem.write",
+        description="Write bounded UTF-8 text to a file in the configured workspace.",
+        mutating=True,
+    )
+
+    def __init__(self, adapter: FilesystemMcpAdapter) -> None:
+        self._adapter = adapter
+
+    async def execute(self, request: ToolRequest) -> ToolResult:
+        raw_path, path = self._adapter.resolve_path(request)
+        content = request.arguments.get("content")
+        expected_sha256 = request.arguments.get("expected_sha256")
+        if not isinstance(content, str) or not isinstance(expected_sha256, str):
+            raise InvalidRequestError(
+                "filesystem writes require string content and expected_sha256"
+            )
+        if "\x00" in content:
+            raise InvalidRequestError(
+                "filesystem write content must not contain null bytes"
+            )
+        content_bytes = content.encode("utf-8")
+        if len(content_bytes) > self._adapter._max_write_bytes:
+            return _failure(
+                request, "file_too_large", "content exceeds configured write limit"
+            )
+
+        metadata = await self._adapter._invoke(
+            request, "get_file_info", {"path": str(path)}
+        )
+        if isinstance(metadata, ToolResult):
+            return metadata
+        size = _extract_file_size(metadata)
+        if size is None:
+            return _failure(
+                request,
+                "malformed_response",
+                "filesystem write precondition metadata lacked a reliable file size",
+            )
+        if size > self._adapter._max_read_bytes:
+            return _failure(
+                request,
+                "file_too_large",
+                "file exceeds configured read limit for hash verification",
+            )
+        current = await self._adapter._invoke(
+            request, "read_text_file", {"path": str(path)}
+        )
+        if isinstance(current, ToolResult):
+            return current
+        current_text = _extract_text(current)
+        if current_text is None:
+            return _failure(
+                request,
+                "malformed_response",
+                "filesystem write precondition read lacked text content",
+            )
+        if sha256_text(current_text) != expected_sha256:
+            return _failure(
+                request,
+                "operation_conflict",
+                "file changed before filesystem write",
+            )
+
+        result = await self._adapter._invoke(
+            request,
+            "write_file",
+            {"path": str(path), "content": content},
+        )
+        if isinstance(result, ToolResult):
+            return result
+        return ToolResult(
+            call_id=request.call_id,
+            success=True,
+            data={"path": raw_path, "bytes_written": len(content_bytes)},
         )
 
 

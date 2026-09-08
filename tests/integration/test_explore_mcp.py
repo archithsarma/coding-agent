@@ -52,6 +52,7 @@ def test_explore_uses_real_filesystem_mcp(tmp_path: Path) -> None:
             StdioMcpClient(settings, workspace_root=workspace_root),
             path_policy=WorkspacePathPolicy(workspace_root),
             max_read_bytes=settings.max_read_bytes,
+            max_write_bytes=settings.max_write_bytes,
             operation_timeout_seconds=settings.operation_timeout_seconds,
         )
         model = IntegrationModel()

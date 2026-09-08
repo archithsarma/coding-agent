@@ -64,6 +64,7 @@ class WorkspacePathPolicy:
         if descriptor.capability not in {
             "filesystem.list",
             "filesystem.read",
+            "filesystem.write",
             "shell.execute",
         }:
             return

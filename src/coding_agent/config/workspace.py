@@ -1,4 +1,4 @@
-"""Validated configuration for the read-only filesystem integration."""
+"""Validated configuration for the workspace filesystem integration."""
 
 from pathlib import Path
 
@@ -20,6 +20,7 @@ class FilesystemMcpSettings(DomainModel):
     server_args: tuple[str, ...] = ("-y",)
     operation_timeout_seconds: float = Field(default=30.0, gt=0)
     max_read_bytes: int = Field(default=1_048_576, gt=0)
+    max_write_bytes: int = Field(default=1_048_576, gt=0)
 
     _validate_text = field_validator("mcp_command", "server_package")(_non_blank)
 
