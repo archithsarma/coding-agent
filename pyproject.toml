@@ -5,6 +5,7 @@ description = "A controlled engineering coding agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
+    "langgraph>=1.2.11",
     "mcp>=2.0,<3",
     "pydantic>=2.10.0",
     "typer>=0.16.0",
