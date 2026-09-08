@@ -1,4 +1,5 @@
 import asyncio
+import json
 import shutil
 from pathlib import Path
 
@@ -28,12 +29,14 @@ pytestmark = pytest.mark.integration
 class EditIntegrationModel:
     def __init__(self) -> None:
         self.structured_calls = 0
+        self.repair_inputs: list[str] = []
 
     async def generate_structured(self, *, output_type, **kwargs):
         self.structured_calls += 1
         if output_type is EditSelection:
             return output_type(paths=["routes/tasks.py"])
         if output_type is RepairPlanOutput:
+            self.repair_inputs.append(kwargs["input"])
             return output_type(
                 can_repair=True,
                 summary="restore title trimming",
@@ -84,14 +87,18 @@ def test_real_edit_trajectory_uses_mcp_transaction(tmp_path: Path) -> None:
     tests = tmp_path / "tests"
     tests.mkdir()
     (tests / "test_tasks.py").write_text(
-        "from routes.tasks import task\n\n"
+        "from routes.tasks import task\n\n\n"
         "def test_title_is_trimmed():\n"
         "    assert task(' Task ') == 'Task'\n",
         encoding="utf-8",
     )
     (routes / "__init__.py").write_text("", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "__init__.py").write_text("", encoding="utf-8")
     (tests / "conftest.py").write_text(
         "import sys\nfrom pathlib import Path\n"
+        "\n"
         "sys.path.insert(0, str(Path(__file__).parents[1]))\n",
         encoding="utf-8",
     )
@@ -162,9 +169,20 @@ def test_real_edit_trajectory_uses_mcp_transaction(tmp_path: Path) -> None:
     )
     assert result["edit"]["operation_record"]["status"] == "succeeded"
     assert len(result["edit"]["operation_record"]["verifications"]) == 4
+    verifications = result["edit"]["operation_record"]["verifications"]
+    assert verifications[0]["passed"] is False
+    assert all(item["passed"] for item in verifications[1:])
     assert result["counters"] == {
         "llm_calls": 3,
-        "tool_calls": 13,
+        "tool_calls": 15,
         "repair_attempts": 1,
     }
     assert model.structured_calls == 3
+    assert len(model.repair_inputs) == 1
+    repair_payload = json.loads(model.repair_inputs[0])
+    repair_source = repair_payload["current_files"][0]["content"]
+    assert "raise ValueError('title')" in repair_source
+    assert "    return title\n" in repair_source
+    assert result["edit"]["source_files"] == []
+    assert result["edit"]["snapshots"] == []
+    assert result["edit"]["current_files"] == []
