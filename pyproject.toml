@@ -5,6 +5,7 @@ description = "A controlled engineering coding agent"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
+    "mcp>=2.0,<3",
     "pydantic>=2.10.0",
     "typer>=0.16.0",
 ]
@@ -25,7 +26,8 @@ build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not integration'"
+markers = ["integration: launches the official filesystem MCP server"]
 
 [tool.ruff]
 line-length = 88
