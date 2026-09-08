@@ -1,118 +1,183 @@
-
 # Coding Agent
 
-A controlled engineering coding agent orchestrated with explicit, testable
-workflow boundaries.
+A LangGraph-based coding assistant that can explore code, run approved
+verification commands, make transactional edits, react to test/lint/type
+feedback, and safely undo prior edits. The implementation focuses on
+orchestration, bounded memory, feedback loops, safe tool usage, and recoverable
+mutation—not on being a general autonomous software engineer.
 
-## Prerequisites
+## What it can do
 
-- Python 3.11 or 3.12
-- [uv](https://docs.astral.sh/uv/)
-- Node.js and `npx` for the filesystem MCP integration test
+- **Explore** — breadth-first repository inventory, bounded file selection, and
+  grounded explanations from filesystem evidence.
+- **Run** — deterministic `pytest`, Ruff, and mypy commands through a secure
+  shell boundary. A failing command is reported as verification feedback; it
+  is not automatically repaired by the Run trajectory.
+- **Edit** — select and read existing files, produce structured exact
+  replacements, prepare a bounded diff, commit through the filesystem MCP,
+  verify, and perform bounded self-repair when a completed verification
+  command fails.
+- **Correction** — session-local, hash-checked Undo for the latest reversible
+  Edit. Human changes are preserved rather than overwritten.
+- **Memory** — typed working state, bounded session outcome history, explicit
+  SQLite coding preferences, and a separate in-memory journal for reversible
+  snapshots.
+- **Product surface** — `chat` and `run` CLI commands, dry-run previews,
+  JSONL tracing, and deterministic-first routing with one validated model
+  fallback for unresolved intent.
 
-## Setup
+The deliberate limits are equally important: no arbitrary shell execution,
+file creation/deletion, git mutation, redo, vector search, or unrestricted
+autonomous tool loop.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    U[User / CLI] --> R[Deterministic router]
+    R -->|unresolved only| RF[Validated model fallback]
+    R --> G[LangGraph StateGraph]
+    RF --> G
+    G --> E[Explore]
+    G --> V[Run]
+    G --> D[Edit]
+    G --> C[Correction]
+    D --> Q[Verification / bounded repair]
+    C --> J[OperationJournal]
+    E --> T[ToolRuntime]
+    V --> T
+    D --> T
+    C --> T
+    T --> P[Policy layer]
+    P --> F[Filesystem MCP]
+    P --> S[Shell MCP]
+    F --> W[Workspace]
+    S --> X[pytest / Ruff / mypy]
+    M[ModelClient] --> G
+    SM[SessionMemory]
+    PM[SQLite PreferenceStore]
+    TS[TraceSink]
+    G -.-> SM
+    G -.-> PM
+    G -.-> TS
+```
+
+The agent depends on semantic internal tool capabilities rather than MCP SDK
+objects. Policies validate requests before adapters cross the MCP boundary;
+the current filesystem remains the source of truth for code.
+
+## Quick start
+
+Requirements: Python 3.11 or 3.12, [uv](https://docs.astral.sh/uv/), and
+Node.js with `npx` for the official filesystem MCP integration.
 
 ```bash
 uv sync
-```
-
-## Basic commands
-
-```bash
 uv run coding-agent health
 uv run coding-agent version
-uv run coding-agent chat --workspace ./demo
-uv run coding-agent run "run tests" --workspace ./demo
 ```
 
-The CLI keeps one session runtime across interactive turns, including its
-session memory and Undo journal. `run` is the same single-turn graph path used
-by `chat`. Use `--dry-run` with either command to plan an Edit and show its
-bounded diff without writing files or running verification. Use
-`--trace-file ./agent-trace.jsonl` to write bounded JSONL execution events;
-trace output should be kept outside the target workspace for normal use.
+For Explore, Edit, repair, and ambiguous routing, configure a model:
 
-Set `OPENAI_API_KEY` (and optionally `OPENAI_MODEL`) for Explore explanations,
-Edit planning, repair, and ambiguous-request routing. Deterministic Run and
-Correction requests remain available without a configured model and model
-requests fail clearly with `model_not_configured`.
+```bash
+export OPENAI_API_KEY="..."
+export OPENAI_MODEL="gpt-4.1-mini"   # optional
+```
 
-The filesystem integration launches `npx -y @modelcontextprotocol/server-filesystem
-<workspace-root>` with a single configured workspace. Filesystem tools are
-isolated to that workspace. Internal transactional filesystem writes are
-workspace-constrained, expected-hash checked, and conflict-checked; a
-The `shell.execute` capability launches the local Shell MCP server
-and permits only structured argv commands for `pytest`, `ruff`, `mypy`, and
-read-only `git status`/`git diff` forms. It never invokes a shell parser;
-working directories stay inside the workspace, and command timeouts and
-stdout/stderr limits are enforced. Shell execution is marked mutating because
-development tools may create caches or other files.
+The CLI keeps one session runtime across `chat` turns. Preferences are stored
+under `${CODING_AGENT_DATA_DIR:-~/.local/share/coding-agent}`; set
+`CODING_AGENT_DATA_DIR` to an application-data directory when needed.
 
-Explore requests use a bounded LangGraph trajectory: inventory is breadth-first,
-generated directories are ignored, selected paths must come from the inventory,
-and file content is read through the filesystem MCP boundary before the model
-receives it. Repository paths and contents are treated as untrusted evidence.
+## Demo
 
-Run requests support deterministic, approved verification commands for `pytest`,
-Ruff, and mypy through the secure Shell MCP boundary. Run does not select
-commands with a model or perform automatic fixes.
+The checked-in target at `examples/task_app` is a small standard-library Task
+service. Its baseline checks are clean and evaluation tests mutate only
+temporary copies.
 
-Edit requests locate and read bounded existing files, propose exact structured
-text replacements, commit them through the transactional filesystem MCP
-boundary, and then run the configured verification suite (`pytest`, `ruff
-check .`, and `mypy src`) fail-fast. A failed check may trigger a bounded,
-exact-replacement auto-repair within the originally selected files. The
-maximum number of repair attempts is configurable through `ExecutionBudget`
-and defaults to two.
+```bash
+uv run coding-agent chat --workspace examples/task_app
+uv run coding-agent run "run tests" --workspace examples/task_app
+```
 
-Correction requests (`undo`, `undo that`, `revert that`, `revert the last
-change`, or `that's wrong`) deterministically revert the latest safely
-reversible Edit in the current session. Undo re-reads every target through the
-filesystem MCP boundary and reports a conflict instead of overwriting later
-workspace changes. It restores known content transactionally, does not run the
-verification suite, and does not provide redo or persistent cross-session undo.
+An illustrative session is:
 
-The agent has three memory tiers:
+```text
+> How are tasks created?
+> Run the tests
+> Add validation to reject empty task titles
+> Undo that
+```
 
-- Working memory is the current typed LangGraph state. Temporary source content
-  is cleared as trajectories finish; no second working-memory database exists.
-- Session memory is an in-memory, session-ID-isolated, bounded list of compact
-  Explore/Run/Edit/Correction outcome events. It stores paths and metadata, not
-  raw source, model prompts/responses, or complete command output. Oldest events
-  are deterministically evicted when event or serialized-byte limits are hit.
-- Persistent memory is an injected SQLite `PreferenceStore` for explicit,
-  bounded coding preferences only. The database path is configurable and should
-  be placed in application data, outside the target workspace. SQLite uses
-  parameterized SQL, a schema version, transactions, and short-lived
-  connections.
+Preview an Edit without writing, verifying, repairing, journaling, or
+committing an operation:
 
-Preferences are captured only from high-confidence explicit wording such as
-`Remember: always use type hints.` Ordinary feedback is not persisted. Edit
-planning and repair retrieve only relevant style/documentation/formatting
-preferences; the current request is always higher precedence, and preference
-text cannot authorize tools, files, commands, or scope changes. Retrieval is
-fail-open with a warning, while an explicit persistence failure is surfaced.
+```bash
+uv run coding-agent run \
+  "Add validation to reject empty task titles" \
+  --workspace examples/task_app --dry-run
+```
 
-Context growth follows HOT/WARM/COLD boundaries: current request, graph state,
-and current filesystem reads are hot; recent compact events and relevant
-preferences are warm; old events are evicted and source is re-read when needed.
-Current filesystem content remains the source of truth.
+Write bounded execution events to JSONL outside the target workspace:
 
-## Checks
+```bash
+uv run coding-agent run "run tests" \
+  --workspace examples/task_app \
+  --trace-file /tmp/coding-agent-trace.jsonl
+```
+
+Deterministic Run and Correction requests work without an API key. Model-backed
+requests fail clearly with `model_not_configured` when no key is configured.
+
+## Testing and evaluation
 
 ```bash
 uv run pytest
+uv run pytest -m integration
+uv run pytest tests/evaluation -v
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src
 ```
 
-Run the real MCP integration test explicitly (it may download the official
-server package through `npx`):
+The ordinary command excludes the eight tests marked `integration`; the
+explicit integration command launches the real local MCP coverage. The
+evaluation suite uses deterministic fake models, real filesystem and shell
+MCP, ToolRuntime, and LangGraph, so it does not require `OPENAI_API_KEY`.
+See [EVALUATION.md](EVALUATION.md) for the scenario map and reviewer commands.
 
-```bash
-uv run pytest -m integration
+At the time of submission: 223 ordinary tests pass with 8 integration tests
+deselected, 8 integration tests pass explicitly, and 21 evaluation tests
+pass.
+
+## Safety model
+
+Filesystem paths are workspace-relative and policy-checked. Edit plans can
+only target inventoried existing files and use exact text replacements with
+expected occurrence counts. SHA-256 hashes protect stale reads, post-write
+verification, rollback, and Undo conflicts.
+
+Shell execution uses structured `argv`, approved verification commands,
+workspace-contained `cwd`, trusted executable resolution, bounded timeouts,
+and bounded stdout/stderr. It never invokes a shell parser or `shell=True`.
+Repository content, model output, and verification output are treated as
+untrusted evidence rather than instructions.
+
+## Repository map
+
+```text
+src/coding_agent/
+  orchestration/   LangGraph state machine and trajectories
+  tools/           semantic runtime and MCP adapters
+  policies/        workspace and shell authorization
+  model/           provider protocol and OpenAI client
+  memory/          session history and SQLite preferences
+  editing.py       exact-replacement transactions and rollback
+  observability.py bounded trace sinks and model tracing
+examples/task_app/ evaluation target
+tests/             unit, MCP integration, and evaluation suites
+EVALUATION.md     scenario-level reviewer guide
+DESIGN.md         architecture, failure semantics, and trade-offs
 ```
 
-This runs both the filesystem and local Shell MCP integration tests; no network
-download is required for the shell server.
+For design rationale and interview-level architecture detail, read
+[DESIGN.md](DESIGN.md).

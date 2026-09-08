@@ -13,16 +13,16 @@ uv run pytest tests/evaluation -v
 Run the complete repository with `uv run pytest` and the real MCP checks with
 `uv run pytest -m integration`.
 
-| Scenario | Main invariant |
-| --- | --- |
-| Explore and inventory | bounded reads; no shell or writes |
-| Run pass/failure | canonical pytest only; observation-only |
-| Edit first pass | transactional write and passing verification |
-| Edit + repair | one bounded repair; final diff is original-to-final |
-| Undo | hash-safe restore with no model or shell call |
-| Memory and dry-run | preference context persists; dry-run never mutates |
-| Routing and budgets | deterministic routes and bounded exhaustion |
-| Security | unsafe paths, commands, prompts, and stale state stay constrained |
+| Scenario | Expected behavior | Safety property |
+| --- | --- | --- |
+| Explore and inventory | bounded inventory, selected reads, grounded answer | no shell or write |
+| Run pass/failure | canonical pytest and `VerificationResult` | observation-only |
+| Edit first pass | exact transactional write and verification | existing files only |
+| Edit + repair | one repair, restarted verification, final logical diff | original scope retained |
+| Undo | hash-safe restore with no model call | human changes are preserved |
+| Memory and dry-run | preference retrieval and candidate diff | no dry-run mutation |
+| Routing and budgets | deterministic route and one fallback call | no unbounded loop |
+| Security | traversal, injection, stale/conflicting state blocked | no authority expansion |
 
 The manual CLI demo can use the same target:
 
