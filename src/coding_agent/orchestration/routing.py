@@ -19,6 +19,7 @@ _RUN_EXACT = {
     "run pytest",
     "check lint",
     "run lint",
+    "run ruff",
     "run mypy",
     "type check",
 }

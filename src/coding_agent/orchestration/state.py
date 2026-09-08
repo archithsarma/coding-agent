@@ -57,6 +57,13 @@ class ExploreState(TypedDict, total=False):
     answer: str
 
 
+class RunState(TypedDict, total=False):
+    command: dict[str, JsonValue]
+    tool_result: JsonValue | None
+    verification: dict[str, JsonValue]
+    answer: str
+
+
 class OrchestrationState(TypedDict, total=False):
     """JSON-shaped state shared by LangGraph nodes."""
 
@@ -69,3 +76,4 @@ class OrchestrationState(TypedDict, total=False):
     counters: ExecutionCounters
     failure: dict[str, JsonValue] | None
     explore: ExploreState
+    run: RunState

@@ -1,4 +1,4 @@
-"""Construction of the Phase 5 LangGraph workflow skeleton."""
+"""Construction of the LangGraph orchestration workflow."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import ValidationError
 
+import coding_agent.orchestration.run as run_nodes
 from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
 from coding_agent.orchestration.context import OrchestrationContext
 from coding_agent.orchestration.explore import (
@@ -33,6 +34,18 @@ from coding_agent.orchestration.explore import (
     select_next,
 )
 from coding_agent.orchestration.routing import route_request
+from coding_agent.orchestration.run import (
+    RUN_COMPLETE,
+    RUN_EXECUTE,
+    RUN_FAILED,
+    RUN_INTERPRET,
+    RUN_PLAN,
+    complete,
+    execute,
+    execute_next,
+    interpret,
+    interpret_next,
+)
 from coding_agent.orchestration.state import (
     ExecutionCounters,
     OrchestrationState,
@@ -40,8 +53,8 @@ from coding_agent.orchestration.state import (
 
 RouteTarget = Literal[
     "explore_inventory",
+    "run_plan",
     "route_edit",
-    "route_run",
     "route_correction",
     "route_unresolved",
 ]
@@ -50,7 +63,7 @@ INITIALIZE = "initialize"
 ROUTE = "route"
 BOUNDARY_EXPLORE = EXPLORE_INVENTORY
 BOUNDARY_EDIT: RouteTarget = "route_edit"
-BOUNDARY_RUN: RouteTarget = "route_run"
+BOUNDARY_RUN: RouteTarget = cast(RouteTarget, RUN_PLAN)
 BOUNDARY_CORRECTION: RouteTarget = "route_correction"
 BOUNDARY_UNRESOLVED: RouteTarget = "route_unresolved"
 
@@ -106,6 +119,7 @@ def build_graph(
             "routing_decision": None,
             "failure": None,
             "explore": {},
+            "run": {},
             "current_node": INITIALIZE,
         }
 
@@ -148,7 +162,11 @@ def build_graph(
     builder.add_node(EXPLORE_ANSWER_ZERO, answer_zero)
     builder.add_node(EXPLORE_FAILED, failed)
     builder.add_node(BOUNDARY_EDIT, cast(Any, route_edit))
-    builder.add_node(BOUNDARY_RUN, cast(Any, route_run))
+    builder.add_node(RUN_PLAN, run_nodes.plan)
+    builder.add_node(RUN_EXECUTE, cast(Any, execute))
+    builder.add_node(RUN_INTERPRET, interpret)
+    builder.add_node(RUN_COMPLETE, complete)
+    builder.add_node(RUN_FAILED, run_nodes.failed)
     builder.add_node(BOUNDARY_CORRECTION, cast(Any, route_correction))
     builder.add_node(BOUNDARY_UNRESOLVED, cast(Any, route_unresolved))
     builder.add_edge(START, INITIALIZE)
@@ -191,13 +209,29 @@ def build_graph(
         read_next,
         {EXPLORE_FAILED: EXPLORE_FAILED, EXPLORE_EXPLAIN: EXPLORE_EXPLAIN},
     )
+    builder.add_conditional_edges(
+        RUN_PLAN,
+        run_nodes.plan_next,
+        {RUN_FAILED: RUN_FAILED, RUN_EXECUTE: RUN_EXECUTE},
+    )
+    builder.add_conditional_edges(
+        RUN_EXECUTE,
+        execute_next,
+        {RUN_FAILED: RUN_FAILED, RUN_INTERPRET: RUN_INTERPRET},
+    )
+    builder.add_conditional_edges(
+        RUN_INTERPRET,
+        interpret_next,
+        {RUN_FAILED: RUN_FAILED, RUN_COMPLETE: RUN_COMPLETE},
+    )
     for name in (
         EXPLORE_ANSWER_INVENTORY,
         EXPLORE_ANSWER_ZERO,
         EXPLORE_EXPLAIN,
         EXPLORE_FAILED,
+        RUN_COMPLETE,
+        RUN_FAILED,
         BOUNDARY_EDIT,
-        BOUNDARY_RUN,
         BOUNDARY_CORRECTION,
         BOUNDARY_UNRESOLVED,
     ):
@@ -211,10 +245,6 @@ def route_explore(_state: OrchestrationState) -> OrchestrationState:
 
 def route_edit(_state: OrchestrationState) -> OrchestrationState:
     return {"current_node": BOUNDARY_EDIT}
-
-
-def route_run(_state: OrchestrationState) -> OrchestrationState:
-    return {"current_node": BOUNDARY_RUN}
 
 
 def route_correction(_state: OrchestrationState) -> OrchestrationState:

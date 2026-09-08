@@ -15,6 +15,7 @@ from coding_agent.orchestration.routing import route_request
         ("run tests", Trajectory.RUN),
         ("run pytest", Trajectory.RUN),
         ("check lint", Trajectory.RUN),
+        ("run ruff", Trajectory.RUN),
         ("run mypy", Trajectory.RUN),
         ("what files are in this project?", Trajectory.EXPLORE),
         ("what does create_task do?", Trajectory.EXPLORE),

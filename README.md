@@ -38,6 +38,10 @@ generated directories are ignored, selected paths must come from the inventory,
 and file content is read through the filesystem MCP boundary before the model
 receives it. Repository paths and contents are treated as untrusted evidence.
 
+Run requests support deterministic, approved verification commands for `pytest`,
+Ruff, and mypy through the secure Shell MCP boundary. Run does not select
+commands with a model or perform automatic fixes.
+
 ## Checks
 
 ```bash

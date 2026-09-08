@@ -4,7 +4,6 @@ from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
 from coding_agent.orchestration.graph import (
     BOUNDARY_CORRECTION,
     BOUNDARY_EDIT,
-    BOUNDARY_RUN,
     BOUNDARY_UNRESOLVED,
     build_graph,
 )
@@ -13,7 +12,6 @@ from coding_agent.orchestration.graph import (
 @pytest.mark.parametrize(
     ("user_request", "boundary", "trajectory"),
     [
-        ("run tests", BOUNDARY_RUN, Trajectory.RUN.value),
         ("undo that", BOUNDARY_CORRECTION, Trajectory.CORRECTION.value),
         ("add title validation", BOUNDARY_EDIT, Trajectory.EDIT.value),
         ("validation", BOUNDARY_UNRESOLVED, None),
@@ -45,7 +43,7 @@ async def test_graph_preserves_budget_and_initializes_counters() -> None:
     result = await build_graph().ainvoke(
         {
             "task_id": "task-1",
-            "user_request": "run tests",
+            "user_request": "validation",
             "execution_budget": budget.model_dump(mode="json"),
         }
     )
