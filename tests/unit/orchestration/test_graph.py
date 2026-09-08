@@ -3,7 +3,6 @@ import pytest
 from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
 from coding_agent.orchestration.graph import (
     BOUNDARY_CORRECTION,
-    BOUNDARY_EDIT,
     BOUNDARY_UNRESOLVED,
     build_graph,
 )
@@ -13,7 +12,6 @@ from coding_agent.orchestration.graph import (
     ("user_request", "boundary", "trajectory"),
     [
         ("undo that", BOUNDARY_CORRECTION, Trajectory.CORRECTION.value),
-        ("add title validation", BOUNDARY_EDIT, Trajectory.EDIT.value),
         ("validation", BOUNDARY_UNRESOLVED, None),
     ],
 )

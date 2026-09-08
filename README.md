@@ -43,6 +43,10 @@ Run requests support deterministic, approved verification commands for `pytest`,
 Ruff, and mypy through the secure Shell MCP boundary. Run does not select
 commands with a model or perform automatic fixes.
 
+Edit requests select and read bounded existing files, propose exact structured
+text replacements, and commit them through the transactional filesystem MCP
+boundary. Automatic verification, repair, and undo after edits are not enabled.
+
 ## Checks
 
 ```bash

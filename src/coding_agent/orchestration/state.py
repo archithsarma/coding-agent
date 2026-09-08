@@ -64,6 +64,18 @@ class RunState(TypedDict, total=False):
     answer: str
 
 
+class EditState(TypedDict, total=False):
+    inventory: list[InventoryEntry]
+    inventory_truncated: bool
+    selected_paths: list[str]
+    source_files: list[ExploreFile]
+    plans: list[JsonValue]
+    snapshots: list[JsonValue]
+    file_changes: list[JsonValue]
+    answer: str
+    operation_record: dict[str, JsonValue]
+
+
 class OrchestrationState(TypedDict, total=False):
     """JSON-shaped state shared by LangGraph nodes."""
 
@@ -77,3 +89,4 @@ class OrchestrationState(TypedDict, total=False):
     failure: dict[str, JsonValue] | None
     explore: ExploreState
     run: RunState
+    edit: EditState

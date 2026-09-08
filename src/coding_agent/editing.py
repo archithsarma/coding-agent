@@ -85,6 +85,14 @@ class EditTransactionResult:
 
 
 @dataclass(frozen=True)
+class EditPreparation:
+    plans: tuple[FileEditPlan, ...]
+    snapshots: tuple[FileSnapshot, ...]
+    file_changes: tuple[FileChange, ...]
+    candidates: tuple[_Candidate, ...]
+
+
+@dataclass(frozen=True)
 class _Candidate:
     snapshot: FileSnapshot
     content: str
@@ -112,13 +120,29 @@ class EditTransaction:
         plans: Iterable[FileEditPlan],
         snapshots: Iterable[FileSnapshot],
     ) -> EditTransactionResult:
+        preparation = self.prepare(plans, snapshots)
+        return await self.commit(preparation)
+
+    def prepare(
+        self,
+        plans: Iterable[FileEditPlan],
+        snapshots: Iterable[FileSnapshot],
+    ) -> EditPreparation:
         plans_tuple = tuple(plans)
         snapshots_tuple = tuple(snapshots)
         if len({snapshot.path for snapshot in snapshots_tuple}) != len(snapshots_tuple):
             raise InvalidRequestError("snapshot paths must be unique")
         snapshots_by_path = {snapshot.path: snapshot for snapshot in snapshots_tuple}
         candidates = self._validate_and_compute(plans_tuple, snapshots_by_path)
+        return EditPreparation(
+            plans=plans_tuple,
+            snapshots=snapshots_tuple,
+            file_changes=tuple(candidate.change for candidate in candidates),
+            candidates=candidates,
+        )
 
+    async def commit(self, preparation: EditPreparation) -> EditTransactionResult:
+        candidates = preparation.candidates
         preflight_failure = await self._preflight(candidates)
         if preflight_failure is not None:
             return preflight_failure

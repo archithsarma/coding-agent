@@ -11,6 +11,58 @@ from pydantic import ValidationError
 import coding_agent.orchestration.run as run_nodes
 from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
 from coding_agent.orchestration.context import OrchestrationContext
+from coding_agent.orchestration.edit import (
+    EDIT_COMMIT,
+    EDIT_COMPLETE,
+    EDIT_FAILED,
+    EDIT_INVENTORY,
+    EDIT_PLAN,
+    EDIT_PREPARE,
+    EDIT_READ,
+    EDIT_SELECT,
+)
+from coding_agent.orchestration.edit import (
+    commit as edit_commit,
+)
+from coding_agent.orchestration.edit import (
+    commit_next as edit_commit_next,
+)
+from coding_agent.orchestration.edit import (
+    complete as edit_complete,
+)
+from coding_agent.orchestration.edit import (
+    failed as edit_failed,
+)
+from coding_agent.orchestration.edit import (
+    inventory as edit_inventory,
+)
+from coding_agent.orchestration.edit import (
+    inventory_next as edit_inventory_next,
+)
+from coding_agent.orchestration.edit import (
+    plan as edit_plan,
+)
+from coding_agent.orchestration.edit import (
+    plan_next as edit_plan_next,
+)
+from coding_agent.orchestration.edit import (
+    prepare as edit_prepare,
+)
+from coding_agent.orchestration.edit import (
+    prepare_next as edit_prepare_next,
+)
+from coding_agent.orchestration.edit import (
+    read as edit_read,
+)
+from coding_agent.orchestration.edit import (
+    read_next as edit_read_next,
+)
+from coding_agent.orchestration.edit import (
+    select as edit_select,
+)
+from coding_agent.orchestration.edit import (
+    select_next as edit_select_next,
+)
 from coding_agent.orchestration.explore import (
     EXPLORE_ANSWER_INVENTORY,
     EXPLORE_ANSWER_ZERO,
@@ -54,7 +106,7 @@ from coding_agent.orchestration.state import (
 RouteTarget = Literal[
     "explore_inventory",
     "run_plan",
-    "route_edit",
+    "edit_inventory",
     "route_correction",
     "route_unresolved",
 ]
@@ -62,7 +114,7 @@ RouteTarget = Literal[
 INITIALIZE = "initialize"
 ROUTE = "route"
 BOUNDARY_EXPLORE = EXPLORE_INVENTORY
-BOUNDARY_EDIT: RouteTarget = "route_edit"
+BOUNDARY_EDIT: RouteTarget = cast(RouteTarget, EDIT_INVENTORY)
 BOUNDARY_RUN: RouteTarget = cast(RouteTarget, RUN_PLAN)
 BOUNDARY_CORRECTION: RouteTarget = "route_correction"
 BOUNDARY_UNRESOLVED: RouteTarget = "route_unresolved"
@@ -120,6 +172,7 @@ def build_graph(
             "failure": None,
             "explore": {},
             "run": {},
+            "edit": {},
             "current_node": INITIALIZE,
         }
 
@@ -161,7 +214,14 @@ def build_graph(
     builder.add_node(EXPLORE_ANSWER_INVENTORY, answer_inventory)
     builder.add_node(EXPLORE_ANSWER_ZERO, answer_zero)
     builder.add_node(EXPLORE_FAILED, failed)
-    builder.add_node(BOUNDARY_EDIT, cast(Any, route_edit))
+    builder.add_node(EDIT_INVENTORY, cast(Any, edit_inventory))
+    builder.add_node(EDIT_SELECT, cast(Any, edit_select))
+    builder.add_node(EDIT_READ, cast(Any, edit_read))
+    builder.add_node(EDIT_PLAN, cast(Any, edit_plan))
+    builder.add_node(EDIT_PREPARE, edit_prepare)
+    builder.add_node(EDIT_COMMIT, cast(Any, edit_commit))
+    builder.add_node(EDIT_COMPLETE, edit_complete)
+    builder.add_node(EDIT_FAILED, edit_failed)
     builder.add_node(RUN_PLAN, run_nodes.plan)
     builder.add_node(RUN_EXECUTE, cast(Any, execute))
     builder.add_node(RUN_INTERPRET, interpret)
@@ -210,6 +270,36 @@ def build_graph(
         {EXPLORE_FAILED: EXPLORE_FAILED, EXPLORE_EXPLAIN: EXPLORE_EXPLAIN},
     )
     builder.add_conditional_edges(
+        EDIT_INVENTORY,
+        edit_inventory_next,
+        {EDIT_FAILED: EDIT_FAILED, EDIT_SELECT: EDIT_SELECT},
+    )
+    builder.add_conditional_edges(
+        EDIT_SELECT,
+        edit_select_next,
+        {EDIT_FAILED: EDIT_FAILED, EDIT_READ: EDIT_READ},
+    )
+    builder.add_conditional_edges(
+        EDIT_READ,
+        edit_read_next,
+        {EDIT_FAILED: EDIT_FAILED, EDIT_PLAN: EDIT_PLAN},
+    )
+    builder.add_conditional_edges(
+        EDIT_PLAN,
+        edit_plan_next,
+        {EDIT_FAILED: EDIT_FAILED, EDIT_PREPARE: EDIT_PREPARE},
+    )
+    builder.add_conditional_edges(
+        EDIT_PREPARE,
+        edit_prepare_next,
+        {EDIT_FAILED: EDIT_FAILED, EDIT_COMMIT: EDIT_COMMIT},
+    )
+    builder.add_conditional_edges(
+        EDIT_COMMIT,
+        edit_commit_next,
+        {EDIT_FAILED: EDIT_FAILED, EDIT_COMPLETE: EDIT_COMPLETE},
+    )
+    builder.add_conditional_edges(
         RUN_PLAN,
         run_nodes.plan_next,
         {RUN_FAILED: RUN_FAILED, RUN_EXECUTE: RUN_EXECUTE},
@@ -231,7 +321,8 @@ def build_graph(
         EXPLORE_FAILED,
         RUN_COMPLETE,
         RUN_FAILED,
-        BOUNDARY_EDIT,
+        EDIT_COMPLETE,
+        EDIT_FAILED,
         BOUNDARY_CORRECTION,
         BOUNDARY_UNRESOLVED,
     ):
@@ -241,10 +332,6 @@ def build_graph(
 
 def route_explore(_state: OrchestrationState) -> OrchestrationState:
     return {"current_node": BOUNDARY_EXPLORE}
-
-
-def route_edit(_state: OrchestrationState) -> OrchestrationState:
-    return {"current_node": BOUNDARY_EDIT}
 
 
 def route_correction(_state: OrchestrationState) -> OrchestrationState:
