@@ -76,6 +76,33 @@ class EditIntegrationModel:
         raise AssertionError("Edit must not call text generation")
 
 
+class UndoIntegrationModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate_structured(self, *, output_type, **kwargs):
+        self.calls += 1
+        if output_type is EditSelection:
+            return output_type(paths=["routes/tasks.py"])
+        return EditPlanOutput(
+            files=[
+                {
+                    "path": "routes/tasks.py",
+                    "replacements": [
+                        {
+                            "old_text": "    return []\n",
+                            "new_text": "    return [1]\n",
+                            "expected_occurrences": 1,
+                        }
+                    ],
+                }
+            ]
+        )
+
+    async def generate_text(self, **kwargs) -> TextGenerationResult:
+        raise AssertionError("Correction must not call text generation")
+
+
 def test_real_edit_trajectory_uses_mcp_transaction(tmp_path: Path) -> None:
     if shutil.which("npx") is None:
         pytest.skip("npx is unavailable; install Node.js to run the MCP test")
@@ -186,3 +213,99 @@ def test_real_edit_trajectory_uses_mcp_transaction(tmp_path: Path) -> None:
     assert result["edit"]["source_files"] == []
     assert result["edit"]["snapshots"] == []
     assert result["edit"]["current_files"] == []
+
+
+def test_real_undo_trajectory_uses_shared_session_journal(tmp_path: Path) -> None:
+    routes = tmp_path / "routes"
+    routes.mkdir()
+    (routes / "__init__.py").write_text("", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "__init__.py").write_text("", encoding="utf-8")
+    source = "def task():\n    return []\n"
+    (routes / "tasks.py").write_text(source, encoding="utf-8")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "conftest.py").write_text(
+        "import sys\nfrom pathlib import Path\n\n"
+        "sys.path.insert(0, str(Path(__file__).parents[1]))\n",
+        encoding="utf-8",
+    )
+    (tests / "test_tasks.py").write_text(
+        "from routes.tasks import task\n\n\n"
+        "def test_task():\n"
+        "    assert task() == [1]\n",
+        encoding="utf-8",
+    )
+    filesystem_settings = FilesystemMcpSettings(
+        workspace_root=tmp_path, operation_timeout_seconds=30
+    )
+    workspace_root = filesystem_settings.resolved_workspace_root()
+    shell_settings = ShellMcpSettings(
+        workspace_root=tmp_path,
+        operation_timeout_seconds=11,
+        default_timeout_seconds=5,
+        max_timeout_seconds=10,
+    )
+    model = UndoIntegrationModel()
+
+    async def scenario():
+        filesystem_adapter = FilesystemMcpAdapter(
+            StdioMcpClient(filesystem_settings, workspace_root=workspace_root),
+            path_policy=WorkspacePathPolicy(workspace_root),
+            max_read_bytes=filesystem_settings.max_read_bytes,
+            max_write_bytes=filesystem_settings.max_write_bytes,
+            operation_timeout_seconds=filesystem_settings.operation_timeout_seconds,
+        )
+        shell_adapter = ShellMcpAdapter(
+            StdioMcpClient(shell_settings, workspace_root=workspace_root),
+            path_policy=WorkspacePathPolicy(workspace_root),
+            settings=shell_settings,
+        )
+        async with filesystem_adapter, shell_adapter:
+            registry = ToolRegistry()
+            filesystem_adapter.register_tools(registry)
+            shell_adapter.register_tools(registry)
+            runtime = ToolRuntime(
+                registry,
+                policies=PolicyChain([WorkspacePathPolicy(workspace_root)]),
+            )
+            context = OrchestrationContext(
+                model=model,
+                tools=runtime,
+                path_policy=WorkspacePathPolicy(workspace_root),
+            )
+            edit_result = await build_graph(
+                ExecutionBudget(
+                    max_llm_calls=4,
+                    max_tool_calls=24,
+                    max_repair_attempts=0,
+                    max_shell_execution_seconds=0,
+                )
+            ).ainvoke(
+                {"task_id": "edit-then-undo", "user_request": "add task behavior"},
+                context=context,
+            )
+            assert (routes / "tasks.py").read_text(encoding="utf-8") != source
+            model_calls_after_edit = model.calls
+            undo_result = await build_graph(
+                ExecutionBudget(
+                    max_llm_calls=4,
+                    max_tool_calls=10,
+                    max_repair_attempts=0,
+                    max_shell_execution_seconds=0,
+                )
+            ).ainvoke(
+                {"task_id": "edit-then-undo", "user_request": "undo that"},
+                context=context,
+            )
+            assert model.calls == model_calls_after_edit
+            return edit_result, undo_result, context.journal
+
+    edit_result, undo_result, journal = asyncio.run(scenario())
+    assert edit_result["edit"]["operation_record"]["status"] == "succeeded"
+    assert undo_result["current_node"] == "correction_complete"
+    assert undo_result["correction"]["operation_record"]["status"] == "succeeded"
+    assert (routes / "tasks.py").read_text(encoding="utf-8") == source
+    assert journal.entries()[0].operation.status.value == "reverted"
+    assert journal.latest() is None

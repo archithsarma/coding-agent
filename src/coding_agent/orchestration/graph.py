@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import ValidationError
 
+import coding_agent.orchestration.correction as correction_nodes
 import coding_agent.orchestration.run as run_nodes
 from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
 from coding_agent.orchestration.context import OrchestrationContext
@@ -248,6 +249,12 @@ def build_graph(
     builder.add_node(RUN_COMPLETE, complete)
     builder.add_node(RUN_FAILED, run_nodes.failed)
     builder.add_node(BOUNDARY_CORRECTION, cast(Any, route_correction))
+    builder.add_node(correction_nodes.CORRECTION_LOOKUP, correction_nodes.lookup)
+    builder.add_node(correction_nodes.CORRECTION_PREFLIGHT, correction_nodes.preflight)
+    builder.add_node(correction_nodes.CORRECTION_PREPARE, correction_nodes.prepare)
+    builder.add_node(correction_nodes.CORRECTION_COMMIT, correction_nodes.commit)
+    builder.add_node(correction_nodes.CORRECTION_COMPLETE, correction_nodes.complete)
+    builder.add_node(correction_nodes.CORRECTION_FAILED, correction_nodes.failed)
     builder.add_node(BOUNDARY_UNRESOLVED, cast(Any, route_unresolved))
     builder.add_edge(START, INITIALIZE)
     builder.add_edge(INITIALIZE, ROUTE)
@@ -344,6 +351,41 @@ def build_graph(
         repair_commit_next,
         {EDIT_FAILED: EDIT_FAILED, EDIT_VERIFY: EDIT_VERIFY},
     )
+    builder.add_edge(BOUNDARY_CORRECTION, correction_nodes.CORRECTION_LOOKUP)
+    builder.add_conditional_edges(
+        correction_nodes.CORRECTION_LOOKUP,
+        correction_nodes.lookup_next,
+        {
+            correction_nodes.CORRECTION_FAILED: correction_nodes.CORRECTION_FAILED,
+            correction_nodes.CORRECTION_PREFLIGHT: (
+                correction_nodes.CORRECTION_PREFLIGHT
+            ),
+        },
+    )
+    builder.add_conditional_edges(
+        correction_nodes.CORRECTION_PREFLIGHT,
+        correction_nodes.preflight_next,
+        {
+            correction_nodes.CORRECTION_FAILED: correction_nodes.CORRECTION_FAILED,
+            correction_nodes.CORRECTION_PREPARE: correction_nodes.CORRECTION_PREPARE,
+        },
+    )
+    builder.add_conditional_edges(
+        correction_nodes.CORRECTION_PREPARE,
+        correction_nodes.prepare_next,
+        {
+            correction_nodes.CORRECTION_FAILED: correction_nodes.CORRECTION_FAILED,
+            correction_nodes.CORRECTION_COMMIT: correction_nodes.CORRECTION_COMMIT,
+        },
+    )
+    builder.add_conditional_edges(
+        correction_nodes.CORRECTION_COMMIT,
+        correction_nodes.commit_next,
+        {
+            correction_nodes.CORRECTION_FAILED: correction_nodes.CORRECTION_FAILED,
+            correction_nodes.CORRECTION_COMPLETE: correction_nodes.CORRECTION_COMPLETE,
+        },
+    )
     builder.add_conditional_edges(
         RUN_PLAN,
         run_nodes.plan_next,
@@ -368,7 +410,8 @@ def build_graph(
         RUN_FAILED,
         EDIT_COMPLETE,
         EDIT_FAILED,
-        BOUNDARY_CORRECTION,
+        correction_nodes.CORRECTION_COMPLETE,
+        correction_nodes.CORRECTION_FAILED,
         BOUNDARY_UNRESOLVED,
     ):
         builder.add_edge(name, END)

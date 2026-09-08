@@ -2,7 +2,6 @@ import pytest
 
 from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
 from coding_agent.orchestration.graph import (
-    BOUNDARY_CORRECTION,
     BOUNDARY_UNRESOLVED,
     build_graph,
 )
@@ -11,7 +10,7 @@ from coding_agent.orchestration.graph import (
 @pytest.mark.parametrize(
     ("user_request", "boundary", "trajectory"),
     [
-        ("undo that", BOUNDARY_CORRECTION, Trajectory.CORRECTION.value),
+        ("undo that", "correction_failed", Trajectory.CORRECTION.value),
         ("validation", BOUNDARY_UNRESOLVED, None),
     ],
 )

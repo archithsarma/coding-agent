@@ -51,6 +51,13 @@ exact-replacement auto-repair within the originally selected files. The
 maximum number of repair attempts is configurable through `ExecutionBudget`
 and defaults to two. Undo and persistent memory are not enabled.
 
+Correction requests (`undo`, `undo that`, `revert that`, `revert the last
+change`, or `that's wrong`) deterministically revert the latest safely
+reversible Edit in the current session. Undo re-reads every target through the
+filesystem MCP boundary and reports a conflict instead of overwriting later
+workspace changes. It restores known content transactionally, does not run the
+verification suite, and does not provide redo or persistent cross-session undo.
+
 ## Checks
 
 ```bash

@@ -32,6 +32,7 @@ from coding_agent.editing import (
     FileSnapshot,
     TextReplacement,
 )
+from coding_agent.journal import ReversibleFile, ReversibleOperation
 from coding_agent.model import (
     ModelError,
     ModelProviderError,
@@ -854,11 +855,14 @@ def repair_commit_next(state: OrchestrationState) -> str:
     return EDIT_FAILED if state.get("failure") else EDIT_VERIFY
 
 
-def complete(state: OrchestrationState) -> dict[str, object]:
+def complete(
+    state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+) -> dict[str, object]:
     edit = _edit(state)
     changes = _logical_file_changes(edit)
     verifications = _verification_results(edit)
     record = _operation_record(state, changes, verifications, OperationStatus.SUCCEEDED)
+    _journal_edit(runtime, edit, record)
     return {
         "edit": {
             **edit,
@@ -877,7 +881,9 @@ def complete(state: OrchestrationState) -> dict[str, object]:
     }
 
 
-def failed(state: OrchestrationState) -> dict[str, object]:
+def failed(
+    state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+) -> dict[str, object]:
     failure = state.get("failure")
     code = str(failure.get("code")) if isinstance(failure, dict) else "edit_failed"
     message = failure.get("message") if isinstance(failure, dict) else "edit failed"
@@ -888,6 +894,8 @@ def failed(state: OrchestrationState) -> dict[str, object]:
         _verification_results(_edit(state)),
         OperationStatus.FAILED,
     )
+    if not (isinstance(details, dict) and details.get("partial_mutation_risk")):
+        _journal_edit(runtime, _edit(state), record)
     if code == "repair_attempts_exhausted":
         answer = (
             f"The edit was applied, but verification still fails after "
@@ -1138,6 +1146,36 @@ def _success_answer(
     else:
         prefix += "Verification passed: " + names + "."
     return prefix
+
+
+def _journal_edit(
+    runtime: Runtime[OrchestrationContext],
+    edit: EditState,
+    record: OperationRecord,
+) -> None:
+    if runtime.context is None:
+        raise RuntimeError("Edit requires runtime context")
+    baseline = {
+        item["path"]: item["content"]
+        for item in edit.get("baseline_files", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and isinstance(item.get("content"), str)
+    }
+    current = {
+        item["path"]: item["content"]
+        for item in edit.get("current_files", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and isinstance(item.get("content"), str)
+    }
+    files = tuple(
+        ReversibleFile(path, before, current[path])
+        for path, before in baseline.items()
+        if path in current and before != current[path]
+    )
+    if files:
+        runtime.context.journal.record(ReversibleOperation(record, files))
 
 
 def _safe_relative_path(path: str) -> bool:

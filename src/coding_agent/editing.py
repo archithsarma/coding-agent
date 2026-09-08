@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from difflib import unified_diff
+from typing import cast
 
 from coding_agent.content import sha256_text
 from coding_agent.domain import (
@@ -315,6 +316,167 @@ class EditTransaction:
         return EditTransactionResult(
             success=False,
             file_changes=tuple(candidate.change for candidate in written),
+            rollback_performed=True,
+            rollback_complete=not rollback_errors and not rollback_conflicts,
+            error=error,
+            rollback_errors=tuple(rollback_errors),
+            rollback_conflicts=tuple(rollback_conflicts),
+        )
+
+
+@dataclass(frozen=True)
+class RestoreItem:
+    path: str
+    expected_content: str
+    desired_content: str
+
+    @property
+    def expected_hash(self) -> str:
+        return sha256_text(self.expected_content)
+
+
+class ContentRestoreTransaction:
+    """Restore known content using expected hashes and rollback protection."""
+
+    def __init__(
+        self,
+        invoker: ToolInvoker,
+        *,
+        path_policy: WorkspacePathPolicy,
+        max_write_bytes: int,
+    ) -> None:
+        self._invoke = invoker
+        self._path_policy = path_policy
+        self._max_write_bytes = max_write_bytes
+
+    async def execute(self, items: Iterable[RestoreItem]) -> EditTransactionResult:
+        items_tuple = tuple(items)
+        if not items_tuple or len({item.path for item in items_tuple}) != len(
+            items_tuple
+        ):
+            raise InvalidRequestError("restore requires unique file items")
+        for item in items_tuple:
+            self._path_policy.resolve_path(item.path)
+            if len(item.desired_content.encode("utf-8")) > self._max_write_bytes:
+                raise InvalidRequestError(
+                    f"restore for '{item.path}' exceeds write limit"
+                )
+
+        current: dict[str, FileSnapshot] = {}
+        for index, item in enumerate(items_tuple):
+            snapshot = await self._read(item.path, index, "restore-preflight")
+            if isinstance(snapshot, ToolResult):
+                return EditTransactionResult(success=False, error=snapshot)
+            if snapshot.sha256 != item.expected_hash:
+                return EditTransactionResult(
+                    success=False,
+                    error=OperationConflictError(
+                        f"file changed since reversible operation: '{item.path}'"
+                    ),
+                )
+            current[item.path] = snapshot
+
+        written: list[RestoreItem] = []
+        for index, item in enumerate(items_tuple):
+            result = await self._invoke(
+                ToolRequest(
+                    call_id=f"correction-write-{index}-{item.path}",
+                    capability="filesystem.write",
+                    arguments={
+                        "path": item.path,
+                        "content": item.desired_content,
+                        "expected_sha256": item.expected_hash,
+                    },
+                )
+            )
+            if not result.success:
+                return await self._failed(result, written)
+            written.append(item)
+            verified = await self._read(item.path, index, "restore-verify")
+            if isinstance(verified, ToolResult):
+                return await self._failed(verified, written)
+            if verified.sha256 != sha256_text(item.desired_content):
+                return await self._failed(
+                    OperationConflictError(f"post-restore mismatch for '{item.path}'"),
+                    written,
+                )
+
+        changes = tuple(
+            FileChange(
+                path=item.path,
+                change_type=ChangeType.MODIFY,
+                before_hash=item.expected_hash,
+                after_hash=sha256_text(item.desired_content),
+                patch=_unified_diff(
+                    item.path, item.expected_content, item.desired_content
+                ),
+            )
+            for item in items_tuple
+        )
+        return EditTransactionResult(success=True, file_changes=changes)
+
+    async def _read(
+        self, path: str, index: int, purpose: str
+    ) -> FileSnapshot | ToolResult:
+        result = await self._invoke(
+            ToolRequest(
+                call_id=f"correction-{purpose}-{index}-{path}",
+                capability="filesystem.read",
+                arguments={"path": path},
+            )
+        )
+        if not result.success:
+            return result
+        if not isinstance(result.data, dict) or not isinstance(
+            result.data.get("content"), str
+        ):
+            return ToolResult(
+                call_id=result.call_id,
+                success=False,
+                error=ToolErrorInfo(
+                    code="malformed_response",
+                    message="filesystem read content was malformed",
+                ),
+            )
+        return FileSnapshot(path, cast(str, result.data["content"]))
+
+    async def _failed(
+        self, error: ToolResult | Exception, written: list[RestoreItem]
+    ) -> EditTransactionResult:
+        if not written:
+            return EditTransactionResult(success=False, error=error)
+        rollback_errors: list[str] = []
+        rollback_conflicts: list[RollbackConflict] = []
+        for index, item in reversed(list(enumerate(written))):
+            current = await self._read(item.path, index, "restore-rollback-check")
+            if isinstance(current, ToolResult):
+                rollback_errors.append(f"{item.path}: {current.error}")
+                continue
+            expected_restored_hash = sha256_text(item.desired_content)
+            if current.sha256 != expected_restored_hash:
+                rollback_conflicts.append(
+                    RollbackConflict(
+                        path=item.path,
+                        current_hash=current.sha256 or "",
+                        expected_after_hash=expected_restored_hash,
+                    )
+                )
+                continue
+            restore = await self._invoke(
+                ToolRequest(
+                    call_id=f"correction-rollback-{index}-{item.path}",
+                    capability="filesystem.write",
+                    arguments={
+                        "path": item.path,
+                        "content": item.expected_content,
+                        "expected_sha256": expected_restored_hash,
+                    },
+                )
+            )
+            if not restore.success:
+                rollback_errors.append(f"{item.path}: {restore.error}")
+        return EditTransactionResult(
+            success=False,
             rollback_performed=True,
             rollback_complete=not rollback_errors and not rollback_conflicts,
             error=error,

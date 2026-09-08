@@ -64,6 +64,14 @@ class RunState(TypedDict, total=False):
     answer: str
 
 
+class CorrectionState(TypedDict, total=False):
+    operation_id: str
+    preflight_complete: bool
+    file_changes: list[JsonValue]
+    operation_record: dict[str, JsonValue]
+    answer: str
+
+
 class EditState(TypedDict, total=False):
     inventory: list[InventoryEntry]
     inventory_truncated: bool
@@ -97,3 +105,4 @@ class OrchestrationState(TypedDict, total=False):
     explore: ExploreState
     run: RunState
     edit: EditState
+    correction: CorrectionState

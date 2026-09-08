@@ -12,6 +12,7 @@ _CORRECTION_EXACT = {
     "undo that",
     "revert that",
     "revert the last change",
+    "that's wrong",
 }
 _RUN_EXACT = {
     "run tests",
