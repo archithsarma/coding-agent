@@ -61,11 +61,18 @@ class WorkspacePathPolicy:
     def validate_request(
         self, descriptor: ToolDescriptor, request: ToolRequest
     ) -> None:
-        if descriptor.capability not in {"filesystem.list", "filesystem.read"}:
+        if descriptor.capability not in {
+            "filesystem.list",
+            "filesystem.read",
+            "shell.execute",
+        }:
             return
-        raw_path = request.arguments.get("path")
+        argument_name = "cwd" if descriptor.capability == "shell.execute" else "path"
+        raw_path = request.arguments.get(argument_name, ".")
         if not isinstance(raw_path, str):
-            raise InvalidRequestError("filesystem requests require a string path")
+            raise InvalidRequestError(
+                f"{argument_name} must be a string for {descriptor.capability}"
+            )
         self.resolve_path(raw_path)
 
     async def validate(self, descriptor: ToolDescriptor, request: ToolRequest) -> None:

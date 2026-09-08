@@ -2,40 +2,33 @@
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import AsyncExitStack
 from pathlib import Path
-from types import TracebackType
 from typing import TYPE_CHECKING
 
 from coding_agent.domain import (
     InvalidRequestError,
-    ToolErrorInfo,
     ToolRequest,
     ToolResult,
 )
 from coding_agent.policies import WorkspacePathPolicy
 from coding_agent.tools.descriptor import ToolDescriptor
+from coding_agent.tools.mcp.adapter import McpAdapter, _extract_text, _failure
 from coding_agent.tools.mcp.client import (
     McpCallResult,
     McpConnection,
-    McpToolDescription,
-)
-from coding_agent.tools.mcp.errors import (
-    McpIntegrationError,
-    McpResponseError,
-    McpTimeoutError,
-    McpToolUnavailableError,
 )
 
 if TYPE_CHECKING:
     from pydantic import JsonValue
 
     from coding_agent.tools.protocol import InternalTool
-    from coding_agent.tools.registry import ToolRegistry
 
 
-class FilesystemMcpAdapter:
+class FilesystemMcpAdapter(McpAdapter):
+    required_external_tools = frozenset(
+        {"read_text_file", "list_directory", "get_file_info"}
+    )
+
     def __init__(
         self,
         connection: McpConnection,
@@ -44,105 +37,14 @@ class FilesystemMcpAdapter:
         max_read_bytes: int,
         operation_timeout_seconds: float,
     ) -> None:
-        self._connection = connection
+        super().__init__(
+            connection, operation_timeout_seconds=operation_timeout_seconds
+        )
         self._path_policy = path_policy
         self._max_read_bytes = max_read_bytes
-        self._timeout = operation_timeout_seconds
-        self._exit_stack: AsyncExitStack | None = None
-        self._active_connection: McpConnection | None = None
-        self._tools: tuple[InternalTool, ...] = ()
 
-    async def __aenter__(self) -> FilesystemMcpAdapter:
-        if self._exit_stack is not None or self._active_connection is not None:
-            raise RuntimeError("filesystem adapter is already connected")
-        stack = AsyncExitStack()
-        await stack.__aenter__()
-        try:
-            connection = await stack.enter_async_context(self._connection)
-            self._active_connection = connection
-            available = {tool.name for tool in await self._discover(connection)}
-            required = {"read_text_file", "list_directory", "get_file_info"}
-            missing = required - available
-            if missing:
-                raise McpToolUnavailableError(
-                    "MCP filesystem server is missing tools: "
-                    f"{', '.join(sorted(missing))}"
-                )
-            self._tools = (
-                _FilesystemListTool(self),
-                _FilesystemReadTool(self),
-            )
-            self._exit_stack = stack
-            return self
-        except BaseException as error:
-            self._active_connection = None
-            self._exit_stack = None
-            self._tools = ()
-            try:
-                await stack.__aexit__(None, None, None)
-            except BaseException as cleanup_error:
-                error.add_note(f"filesystem startup cleanup failed: {cleanup_error}")
-            raise
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        stack = self._exit_stack
-        self._exit_stack = None
-        self._active_connection = None
-        self._tools = ()
-        if stack is not None:
-            await stack.__aexit__(exc_type, exc_value, traceback)
-
-    def register_tools(self, registry: ToolRegistry) -> None:
-        if self._exit_stack is None:
-            raise RuntimeError(
-                "filesystem adapter must be connected before registration"
-            )
-        for tool in self._tools:
-            registry.register(tool)
-
-    async def _discover(
-        self, connection: McpConnection
-    ) -> tuple[McpToolDescription, ...]:
-        try:
-            async with asyncio.timeout(self._timeout):
-                return await connection.list_tools()
-        except TimeoutError as error:
-            raise McpTimeoutError("MCP tool discovery timed out") from error
-
-    async def _invoke(
-        self,
-        request: ToolRequest,
-        external_name: str,
-        path: Path,
-    ) -> McpCallResult | ToolResult:
-        connection = self._active_connection
-        if connection is None:
-            raise RuntimeError("filesystem adapter is disconnected")
-        try:
-            async with asyncio.timeout(self._timeout):
-                result = await connection.call_tool(external_name, {"path": str(path)})
-                if result.is_error:
-                    return _failure(
-                        request,
-                        "mcp_tool_error",
-                        _extract_text(result) or f"MCP tool '{external_name}' failed",
-                    )
-                return result
-        except TimeoutError:
-            return _failure(
-                request, "mcp_timeout", f"MCP tool '{external_name}' timed out"
-            )
-        except McpTimeoutError as error:
-            return _failure(request, "mcp_timeout", str(error))
-        except McpResponseError as error:
-            return _failure(request, "malformed_response", str(error))
-        except McpIntegrationError as error:
-            return _failure(request, "mcp_tool_error", str(error))
+    def _build_tools(self) -> tuple[InternalTool, ...]:
+        return (_FilesystemListTool(self), _FilesystemReadTool(self))
 
     def resolve_path(self, request: ToolRequest) -> tuple[str, Path]:
         raw_path = request.arguments.get("path")
@@ -165,7 +67,9 @@ class _FilesystemListTool:
     async def execute(self, request: ToolRequest) -> ToolResult:
         resolved = self._adapter.resolve_path(request)
         raw_path, path = resolved
-        result = await self._adapter._invoke(request, "list_directory", path)
+        result = await self._adapter._invoke(
+            request, "list_directory", {"path": str(path)}
+        )
         if isinstance(result, ToolResult):
             return result
         text = _extract_text(result)
@@ -209,7 +113,9 @@ class _FilesystemReadTool:
     async def execute(self, request: ToolRequest) -> ToolResult:
         resolved = self._adapter.resolve_path(request)
         raw_path, path = resolved
-        metadata = await self._adapter._invoke(request, "get_file_info", path)
+        metadata = await self._adapter._invoke(
+            request, "get_file_info", {"path": str(path)}
+        )
         if isinstance(metadata, ToolResult):
             return metadata
         size = _extract_file_size(metadata)
@@ -223,7 +129,9 @@ class _FilesystemReadTool:
             return _failure(
                 request, "file_too_large", "file exceeds configured read limit"
             )
-        result = await self._adapter._invoke(request, "read_text_file", path)
+        result = await self._adapter._invoke(
+            request, "read_text_file", {"path": str(path)}
+        )
         if isinstance(result, ToolResult):
             return result
         text = _extract_text(result)
@@ -236,19 +144,6 @@ class _FilesystemReadTool:
             success=True,
             data={"path": raw_path, "content": text},
         )
-
-
-def _extract_text(result: McpCallResult) -> str | None:
-    if isinstance(result.structured_content, dict):
-        content = result.structured_content.get("content")
-        if isinstance(content, str):
-            return content
-    for item in result.content:
-        if isinstance(item, dict) and item.get("type") == "text":
-            text = item.get("text")
-            if isinstance(text, str):
-                return text
-    return None
 
 
 def _extract_file_size(result: McpCallResult) -> int | None:
@@ -278,11 +173,3 @@ def _entry_name(entry: JsonValue) -> str:
         if isinstance(name, str):
             return name
     return ""
-
-
-def _failure(request: ToolRequest, code: str, message: str) -> ToolResult:
-    return ToolResult(
-        call_id=request.call_id,
-        success=False,
-        error=ToolErrorInfo(code=code, message=message),
-    )

@@ -7,6 +7,7 @@ from coding_agent.tools.mcp.client import (
     StdioMcpClient,
 )
 from coding_agent.tools.mcp.filesystem import FilesystemMcpAdapter
+from coding_agent.tools.mcp.shell import ShellMcpAdapter
 
 __all__ = [
     "FilesystemMcpAdapter",
@@ -14,4 +15,5 @@ __all__ = [
     "McpConnection",
     "McpToolDescription",
     "StdioMcpClient",
+    "ShellMcpAdapter",
 ]

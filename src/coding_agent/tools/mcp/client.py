@@ -11,7 +11,6 @@ from typing import Protocol
 from mcp import Client, MCPError, StdioServerParameters
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
-from coding_agent.config import FilesystemMcpSettings
 from coding_agent.tools.mcp.errors import (
     McpConnectionError,
     McpResponseError,
@@ -53,9 +52,18 @@ class McpConnection(Protocol):
     ) -> McpCallResult: ...
 
 
+class McpServerSettings(Protocol):
+    mcp_command: str
+    operation_timeout_seconds: float
+
+    def resolved_workspace_root(self) -> Path: ...
+
+    def server_arguments(self, workspace_root: Path | None = None) -> list[str]: ...
+
+
 class StdioMcpClient(McpConnection):
     def __init__(
-        self, settings: FilesystemMcpSettings, *, workspace_root: Path | None = None
+        self, settings: McpServerSettings, *, workspace_root: Path | None = None
     ) -> None:
         self._settings = settings
         self._workspace_root = workspace_root or settings.resolved_workspace_root()

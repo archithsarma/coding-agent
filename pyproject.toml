@@ -27,7 +27,7 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -m 'not integration'"
-markers = ["integration: launches the official filesystem MCP server"]
+markers = ["integration: launches a real local MCP server"]
 
 [tool.ruff]
 line-length = 88

@@ -2,6 +2,7 @@
 
 from coding_agent.policies.composition import PolicyChain
 from coding_agent.policies.protocol import ExecutionPolicy
+from coding_agent.policies.shell import ShellCommandPolicy
 from coding_agent.policies.workspace import WorkspacePathPolicy, WorkspacePathResolver
 
 __all__ = [
@@ -9,4 +10,5 @@ __all__ = [
     "PolicyChain",
     "WorkspacePathPolicy",
     "WorkspacePathResolver",
+    "ShellCommandPolicy",
 ]

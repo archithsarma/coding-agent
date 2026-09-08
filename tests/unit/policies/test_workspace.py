@@ -16,6 +16,15 @@ def filesystem_descriptor() -> ToolDescriptor:
     )
 
 
+def shell_descriptor() -> ToolDescriptor:
+    return ToolDescriptor(
+        tool_name="shell-execute",
+        capability="shell.execute",
+        description="Execute approved development commands.",
+        mutating=True,
+    )
+
+
 def test_workspace_policy_accepts_nested_relative_paths(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_text("print('ok')", encoding="utf-8")
@@ -58,5 +67,25 @@ def test_workspace_policy_rejects_symlink_escape(tmp_path: Path) -> None:
                 call_id="1",
                 capability="filesystem.read",
                 arguments={"path": "link"},
+            ),
+        )
+
+
+def test_workspace_policy_validates_shell_cwd(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    policy = WorkspacePathPolicy(tmp_path)
+
+    policy.validate_request(
+        shell_descriptor(),
+        ToolRequest(
+            call_id="1", capability="shell.execute", arguments={"cwd": "tests"}
+        ),
+    )
+
+    with pytest.raises(PolicyViolationError):
+        policy.validate_request(
+            shell_descriptor(),
+            ToolRequest(
+                call_id="2", capability="shell.execute", arguments={"cwd": "../outside"}
             ),
         )
