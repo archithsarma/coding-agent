@@ -27,7 +27,7 @@ The filesystem integration launches `npx -y @modelcontextprotocol/server-filesys
 <workspace-root>` with a single configured workspace. Filesystem tools are
 isolated to that workspace. Internal transactional filesystem writes are
 workspace-constrained, expected-hash checked, and conflict-checked; a
-user-facing Edit trajectory is not implemented yet. The `shell.execute` capability launches the local Shell MCP server
+The `shell.execute` capability launches the local Shell MCP server
 and permits only structured argv commands for `pytest`, `ruff`, `mypy`, and
 read-only `git status`/`git diff` forms. It never invokes a shell parser;
 working directories stay inside the workspace, and command timeouts and
@@ -43,9 +43,13 @@ Run requests support deterministic, approved verification commands for `pytest`,
 Ruff, and mypy through the secure Shell MCP boundary. Run does not select
 commands with a model or perform automatic fixes.
 
-Edit requests select and read bounded existing files, propose exact structured
-text replacements, and commit them through the transactional filesystem MCP
-boundary. Automatic verification, repair, and undo after edits are not enabled.
+Edit requests locate and read bounded existing files, propose exact structured
+text replacements, commit them through the transactional filesystem MCP
+boundary, and then run the configured verification suite (`pytest`, `ruff
+check .`, and `mypy src`) fail-fast. A failed check may trigger a bounded,
+exact-replacement auto-repair within the originally selected files. The
+maximum number of repair attempts is configurable through `ExecutionBudget`
+and defaults to two. Undo and persistent memory are not enabled.
 
 ## Checks
 

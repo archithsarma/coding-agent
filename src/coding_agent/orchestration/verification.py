@@ -19,6 +19,21 @@ class VerificationCommand:
     cwd: str = "."
 
 
+def command_from_argv(argv: tuple[str, ...]) -> VerificationCommand:
+    kinds = {
+        ("pytest",): VerificationKind.TEST,
+        ("ruff", "check", "."): VerificationKind.LINT,
+        ("mypy", "src"): VerificationKind.TYPE_CHECK,
+    }
+    try:
+        kind = kinds[argv]
+    except KeyError as error:
+        raise ValueError(
+            f"unsupported verification command: {' '.join(argv)}"
+        ) from error
+    return VerificationCommand(kind, argv)
+
+
 class VerificationPayloadError(ValueError):
     """A successful shell result did not match the normalized contract."""
 

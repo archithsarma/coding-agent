@@ -13,7 +13,11 @@ from coding_agent.domain import (
 )
 from coding_agent.model import ModelError, ModelTimeoutError
 from coding_agent.orchestration.context import OrchestrationContext
-from coding_agent.orchestration.edit import EditPlanOutput, EditSelection
+from coding_agent.orchestration.edit import (
+    EditPlanOutput,
+    EditSelection,
+    RepairPlanOutput,
+)
 from coding_agent.orchestration.edit_config import EditConfig
 from coding_agent.orchestration.graph import build_graph
 from coding_agent.policies import PolicyChain, WorkspacePathPolicy
@@ -35,6 +39,8 @@ class EditModel:
         )
         self.structured_inputs: list[str] = []
         self.structured_instructions: list[str] = []
+        self.repair_old = ""
+        self.repair_new = ""
 
     async def generate_structured(self, *, instructions, input, output_type, **kwargs):
         self.structured_inputs.append(input)
@@ -43,6 +49,23 @@ class EditModel:
             if self.fail_selection:
                 raise ModelTimeoutError("selection timed out")
             return output_type(paths=self.selected)
+        if output_type is RepairPlanOutput:
+            return RepairPlanOutput(
+                can_repair=True,
+                summary="repair",
+                files=[
+                    {
+                        "path": self.planned_path,
+                        "replacements": [
+                            {
+                                "old_text": self.repair_old,
+                                "new_text": self.repair_new,
+                                "expected_occurrences": 1,
+                            }
+                        ],
+                    }
+                ],
+            )
         if self.fail_plan:
             raise ModelError("planning failed")
         return EditPlanOutput(
@@ -135,7 +158,35 @@ class Tool:
         return await self.handler(request)
 
 
-def runtime(filesystem: FakeFilesystem, tmp_path: Path) -> ToolRuntime:
+class FakeShell:
+    def __init__(self, exit_codes: list[int] | None = None) -> None:
+        self.exit_codes = exit_codes or [0, 0, 0]
+
+    async def execute(self, request: ToolRequest) -> ToolResult:
+        argv = request.arguments["argv"]
+        exit_code = self.exit_codes.pop(0) if self.exit_codes else 0
+        return ToolResult(
+            call_id=request.call_id,
+            success=True,
+            data={
+                "argv": argv,
+                "cwd": ".",
+                "exit_code": exit_code,
+                "stdout": "",
+                "stderr": "",
+                "duration_ms": 1,
+                "timed_out": False,
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+            },
+        )
+
+
+def runtime(
+    filesystem: FakeFilesystem,
+    tmp_path: Path,
+    shell_exit_codes: list[int] | None = None,
+) -> ToolRuntime:
     registry = ToolRegistry()
     registry.register(
         Tool(
@@ -146,6 +197,17 @@ def runtime(filesystem: FakeFilesystem, tmp_path: Path) -> ToolRuntime:
                 mutating=False,
             ),
             filesystem.list_tool,
+        )
+    )
+    registry.register(
+        Tool(
+            ToolDescriptor(
+                tool_name="fake-shell",
+                capability="shell.execute",
+                description="shell",
+                mutating=True,
+            ),
+            FakeShell(shell_exit_codes).execute,
         )
     )
     registry.register(
@@ -176,11 +238,13 @@ def runtime(filesystem: FakeFilesystem, tmp_path: Path) -> ToolRuntime:
     )
 
 
-def budget(*, max_tool_calls: int = 64, max_llm_calls: int = 2) -> ExecutionBudget:
+def budget(
+    *, max_tool_calls: int = 64, max_llm_calls: int = 2, max_repair_attempts: int = 0
+) -> ExecutionBudget:
     return ExecutionBudget(
         max_llm_calls=max_llm_calls,
         max_tool_calls=max_tool_calls,
-        max_repair_attempts=0,
+        max_repair_attempts=max_repair_attempts,
         max_shell_execution_seconds=0,
     )
 
@@ -192,14 +256,20 @@ async def run_edit(
     *,
     max_tool_calls: int = 64,
     max_llm_calls: int = 2,
+    max_repair_attempts: int = 0,
+    shell_exit_codes: list[int] | None = None,
 ):
     return await build_graph(
-        budget(max_tool_calls=max_tool_calls, max_llm_calls=max_llm_calls)
+        budget(
+            max_tool_calls=max_tool_calls,
+            max_llm_calls=max_llm_calls,
+            max_repair_attempts=max_repair_attempts,
+        )
     ).ainvoke(
         {"task_id": "task-1", "user_request": "add title validation"},
         context=OrchestrationContext(
             model=model,
-            tools=runtime(filesystem, tmp_path),
+            tools=runtime(filesystem, tmp_path, shell_exit_codes),
             path_policy=WorkspacePathPolicy(tmp_path),
             edit_config=EditConfig(max_write_bytes=1000),
         ),
@@ -210,7 +280,7 @@ async def run_edit(
 async def test_edit_happy_path_has_two_model_calls_and_operation_record(tmp_path: Path):
     filesystem = FakeFilesystem({"routes/tasks.py": "def task():\n    return []\n"})
     model = EditModel()
-    result = await run_edit(tmp_path, filesystem, model, max_tool_calls=8)
+    result = await run_edit(tmp_path, filesystem, model, max_tool_calls=9)
 
     assert result["current_node"] == "edit_complete"
     assert result["failure"] is None
@@ -221,15 +291,46 @@ async def test_edit_happy_path_has_two_model_calls_and_operation_record(tmp_path
     assert result["edit"]["file_changes"][0]["path"] == "routes/tasks.py"
     assert result["edit"]["operation_record"]["trajectory"] == "edit"
     assert result["edit"]["operation_record"]["status"] == "succeeded"
-    assert result["edit"]["operation_record"]["verifications"] == []
+    assert len(result["edit"]["operation_record"]["verifications"]) == 3
     assert result["counters"] == {
         "llm_calls": 2,
-        "tool_calls": 6,
+        "tool_calls": 9,
         "repair_attempts": 0,
     }
     assert len(model.structured_inputs) == 2
     assert "def task" in model.structured_inputs[1]
-    assert not [call for call in filesystem.calls if call.capability == "shell.execute"]
+
+
+@pytest.mark.anyio
+async def test_edit_restarts_verification_after_bounded_repair(tmp_path: Path):
+    filesystem = FakeFilesystem(
+        {"routes/tasks.py": "def task(title):\n    return []\n"}
+    )
+    model = EditModel()
+    model.repair_old = "return []"
+    model.repair_new = "return [title]"
+    result = await run_edit(
+        tmp_path,
+        filesystem,
+        model,
+        max_tool_calls=15,
+        max_llm_calls=3,
+        max_repair_attempts=2,
+        shell_exit_codes=[1, 0, 0, 0],
+    )
+
+    assert result["current_node"] == "edit_complete"
+    assert result["counters"] == {
+        "llm_calls": 3,
+        "tool_calls": 13,
+        "repair_attempts": 1,
+    }
+    assert filesystem.contents["routes/tasks.py"].endswith("return [title]\n")
+    assert len(result["edit"]["operation_record"]["verifications"]) == 4
+    assert (
+        result["edit"]["file_changes"][0]["before_hash"]
+        != result["edit"]["file_changes"][0]["after_hash"]
+    )
 
 
 @pytest.mark.parametrize("planned_path", ["users.py", "../outside.py"])
@@ -322,7 +423,7 @@ async def test_budget_reserve_blocks_mutation_and_minimum_safe_budget_allows_it(
     ]
 
     allowed_fs = FakeFilesystem({"routes/tasks.py": "return []"})
-    allowed = await run_edit(tmp_path, allowed_fs, EditModel(), max_tool_calls=8)
+    allowed = await run_edit(tmp_path, allowed_fs, EditModel(), max_tool_calls=9)
     assert allowed["current_node"] == "edit_complete"
 
 
@@ -361,7 +462,7 @@ async def test_partial_rollback_is_high_severity_and_has_no_success_record(
     assert result["failure"]["code"] == "partial_mutation"
     assert result["failure"]["details"]["partial_mutation_risk"] is True
     assert "partial changes" in result["edit"]["answer"]
-    assert "operation_record" not in result["edit"]
+    assert result["edit"]["operation_record"]["status"] == "failed"
 
 
 @pytest.mark.anyio

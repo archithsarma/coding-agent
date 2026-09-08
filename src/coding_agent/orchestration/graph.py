@@ -19,7 +19,17 @@ from coding_agent.orchestration.edit import (
     EDIT_PLAN,
     EDIT_PREPARE,
     EDIT_READ,
+    EDIT_REPAIR_COMMIT,
+    EDIT_REPAIR_PLAN,
+    EDIT_REPAIR_PREPARE,
     EDIT_SELECT,
+    EDIT_VERIFY,
+    repair_commit,
+    repair_commit_next,
+    repair_plan,
+    repair_plan_next,
+    repair_prepare,
+    repair_prepare_next,
 )
 from coding_agent.orchestration.edit import (
     commit as edit_commit,
@@ -62,6 +72,12 @@ from coding_agent.orchestration.edit import (
 )
 from coding_agent.orchestration.edit import (
     select_next as edit_select_next,
+)
+from coding_agent.orchestration.edit import (
+    verify as edit_verify,
+)
+from coding_agent.orchestration.edit import (
+    verify_next as edit_verify_next,
 )
 from coding_agent.orchestration.explore import (
     EXPLORE_ANSWER_INVENTORY,
@@ -120,9 +136,9 @@ BOUNDARY_CORRECTION: RouteTarget = "route_correction"
 BOUNDARY_UNRESOLVED: RouteTarget = "route_unresolved"
 
 _DEFAULT_BUDGET = ExecutionBudget(
-    max_llm_calls=2,
+    max_llm_calls=4,
     max_tool_calls=64,
-    max_repair_attempts=0,
+    max_repair_attempts=2,
     max_shell_execution_seconds=0,
 )
 _DEFAULT_COUNTERS: ExecutionCounters = {
@@ -220,6 +236,10 @@ def build_graph(
     builder.add_node(EDIT_PLAN, cast(Any, edit_plan))
     builder.add_node(EDIT_PREPARE, edit_prepare)
     builder.add_node(EDIT_COMMIT, cast(Any, edit_commit))
+    builder.add_node(EDIT_VERIFY, cast(Any, edit_verify))
+    builder.add_node(EDIT_REPAIR_PLAN, cast(Any, repair_plan))
+    builder.add_node(EDIT_REPAIR_PREPARE, repair_prepare)
+    builder.add_node(EDIT_REPAIR_COMMIT, cast(Any, repair_commit))
     builder.add_node(EDIT_COMPLETE, edit_complete)
     builder.add_node(EDIT_FAILED, edit_failed)
     builder.add_node(RUN_PLAN, run_nodes.plan)
@@ -297,7 +317,32 @@ def build_graph(
     builder.add_conditional_edges(
         EDIT_COMMIT,
         edit_commit_next,
-        {EDIT_FAILED: EDIT_FAILED, EDIT_COMPLETE: EDIT_COMPLETE},
+        {EDIT_FAILED: EDIT_FAILED, EDIT_VERIFY: EDIT_VERIFY},
+    )
+    builder.add_conditional_edges(
+        EDIT_VERIFY,
+        edit_verify_next,
+        {
+            EDIT_FAILED: EDIT_FAILED,
+            EDIT_VERIFY: EDIT_VERIFY,
+            EDIT_REPAIR_PLAN: EDIT_REPAIR_PLAN,
+            EDIT_COMPLETE: EDIT_COMPLETE,
+        },
+    )
+    builder.add_conditional_edges(
+        EDIT_REPAIR_PLAN,
+        repair_plan_next,
+        {EDIT_FAILED: EDIT_FAILED, EDIT_REPAIR_PREPARE: EDIT_REPAIR_PREPARE},
+    )
+    builder.add_conditional_edges(
+        EDIT_REPAIR_PREPARE,
+        repair_prepare_next,
+        {EDIT_FAILED: EDIT_FAILED, EDIT_REPAIR_COMMIT: EDIT_REPAIR_COMMIT},
+    )
+    builder.add_conditional_edges(
+        EDIT_REPAIR_COMMIT,
+        repair_commit_next,
+        {EDIT_FAILED: EDIT_FAILED, EDIT_VERIFY: EDIT_VERIFY},
     )
     builder.add_conditional_edges(
         RUN_PLAN,

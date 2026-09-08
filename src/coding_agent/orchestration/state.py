@@ -74,6 +74,13 @@ class EditState(TypedDict, total=False):
     file_changes: list[JsonValue]
     answer: str
     operation_record: dict[str, JsonValue]
+    baseline_files: list[ExploreFile]
+    current_files: list[ExploreFile]
+    verification_index: int
+    verification_history: list[JsonValue]
+    failed_verification: dict[str, JsonValue]
+    failure_fingerprints: list[str]
+    last_repair_fingerprint: str
 
 
 class OrchestrationState(TypedDict, total=False):

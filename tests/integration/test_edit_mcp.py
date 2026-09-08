@@ -4,15 +4,23 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.config import FilesystemMcpSettings
+from coding_agent.config import FilesystemMcpSettings, ShellMcpSettings
 from coding_agent.domain import ExecutionBudget
 from coding_agent.model import TextGenerationResult
 from coding_agent.orchestration.context import OrchestrationContext
-from coding_agent.orchestration.edit import EditPlanOutput, EditSelection
+from coding_agent.orchestration.edit import (
+    EditPlanOutput,
+    EditSelection,
+    RepairPlanOutput,
+)
 from coding_agent.orchestration.graph import build_graph
 from coding_agent.policies import PolicyChain, WorkspacePathPolicy
 from coding_agent.tools import ToolRegistry, ToolRuntime
-from coding_agent.tools.mcp import FilesystemMcpAdapter, StdioMcpClient
+from coding_agent.tools.mcp import (
+    FilesystemMcpAdapter,
+    ShellMcpAdapter,
+    StdioMcpClient,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -25,17 +33,34 @@ class EditIntegrationModel:
         self.structured_calls += 1
         if output_type is EditSelection:
             return output_type(paths=["routes/tasks.py"])
+        if output_type is RepairPlanOutput:
+            return output_type(
+                can_repair=True,
+                summary="restore title trimming",
+                files=[
+                    {
+                        "path": "routes/tasks.py",
+                        "replacements": [
+                            {
+                                "old_text": "    return title\n",
+                                "new_text": "    return title.strip()\n",
+                                "expected_occurrences": 1,
+                            }
+                        ],
+                    }
+                ],
+            )
         return EditPlanOutput(
             files=[
                 {
                     "path": "routes/tasks.py",
                     "replacements": [
                         {
-                            "old_text": "return []",
+                            "old_text": "    return title.strip()\n",
                             "new_text": (
-                                "if not title.strip():\n"
+                                "    if not title.strip():\n"
                                 "        raise ValueError('title')\n"
-                                "    return []"
+                                "    return title\n"
                             ),
                             "expected_occurrences": 1,
                         }
@@ -54,8 +79,22 @@ def test_real_edit_trajectory_uses_mcp_transaction(tmp_path: Path) -> None:
 
     routes = tmp_path / "routes"
     routes.mkdir()
-    source = "def task(title):\n    return []\n"
+    source = "def task(title):\n    return title.strip()\n"
     (routes / "tasks.py").write_text(source, encoding="utf-8")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_tasks.py").write_text(
+        "from routes.tasks import task\n\n"
+        "def test_title_is_trimmed():\n"
+        "    assert task(' Task ') == 'Task'\n",
+        encoding="utf-8",
+    )
+    (routes / "__init__.py").write_text("", encoding="utf-8")
+    (tests / "conftest.py").write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parents[1]))\n",
+        encoding="utf-8",
+    )
     settings = FilesystemMcpSettings(
         workspace_root=tmp_path, operation_timeout_seconds=30
     )
@@ -70,18 +109,30 @@ def test_real_edit_trajectory_uses_mcp_transaction(tmp_path: Path) -> None:
             max_write_bytes=settings.max_write_bytes,
             operation_timeout_seconds=settings.operation_timeout_seconds,
         )
-        async with adapter:
+        shell_settings = ShellMcpSettings(
+            workspace_root=tmp_path,
+            operation_timeout_seconds=11,
+            default_timeout_seconds=5,
+            max_timeout_seconds=10,
+        )
+        shell_adapter = ShellMcpAdapter(
+            StdioMcpClient(shell_settings, workspace_root=workspace_root),
+            path_policy=WorkspacePathPolicy(workspace_root),
+            settings=shell_settings,
+        )
+        async with adapter, shell_adapter:
             registry = ToolRegistry()
             adapter.register_tools(registry)
+            shell_adapter.register_tools(registry)
             runtime = ToolRuntime(
                 registry,
                 policies=PolicyChain([WorkspacePathPolicy(workspace_root)]),
             )
             return await build_graph(
                 ExecutionBudget(
-                    max_llm_calls=2,
-                    max_tool_calls=8,
-                    max_repair_attempts=0,
+                    max_llm_calls=4,
+                    max_tool_calls=32,
+                    max_repair_attempts=2,
                     max_shell_execution_seconds=0,
                 )
             ).ainvoke(
@@ -101,7 +152,7 @@ def test_real_edit_trajectory_uses_mcp_transaction(tmp_path: Path) -> None:
         "def task(title):\n"
         "    if not title.strip():\n"
         "        raise ValueError('title')\n"
-        "    return []\n"
+        "    return title.strip()\n"
     )
     assert result["edit"]["file_changes"][0]["path"] == "routes/tasks.py"
     assert result["edit"]["file_changes"][0]["before_hash"]
@@ -110,10 +161,10 @@ def test_real_edit_trajectory_uses_mcp_transaction(tmp_path: Path) -> None:
         "--- a/routes/tasks.py"
     )
     assert result["edit"]["operation_record"]["status"] == "succeeded"
-    assert result["edit"]["operation_record"]["verifications"] == []
+    assert len(result["edit"]["operation_record"]["verifications"]) == 4
     assert result["counters"] == {
-        "llm_calls": 2,
-        "tool_calls": 6,
-        "repair_attempts": 0,
+        "llm_calls": 3,
+        "tool_calls": 13,
+        "repair_attempts": 1,
     }
-    assert model.structured_calls == 2
+    assert model.structured_calls == 3
