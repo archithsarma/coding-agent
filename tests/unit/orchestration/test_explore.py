@@ -1,11 +1,17 @@
 import pytest
 
-from coding_agent.domain import ExecutionBudget, ToolErrorInfo, ToolRequest, ToolResult
-from coding_agent.model import ModelError, TextGenerationResult
+from coding_agent.domain import (
+    ExecutionBudget,
+    PolicyViolationError,
+    ToolErrorInfo,
+    ToolRequest,
+    ToolResult,
+)
+from coding_agent.model import ModelError, ModelTimeoutError, TextGenerationResult
 from coding_agent.orchestration.context import OrchestrationContext
 from coding_agent.orchestration.explore_config import ExploreConfig
 from coding_agent.orchestration.graph import build_graph
-from coding_agent.tools import ToolDescriptor, ToolRegistry, ToolRuntime
+from coding_agent.tools import PolicyChain, ToolDescriptor, ToolRegistry, ToolRuntime
 
 
 class FakeFilesystem:
@@ -84,6 +90,16 @@ def make_runtime(filesystem: FakeFilesystem) -> ToolRuntime:
     return ToolRuntime(registry)
 
 
+class RejectingPolicy:
+    async def validate(self, descriptor, request):
+        raise PolicyViolationError("workspace policy rejected request")
+
+
+class ExplodingFilesystem(FakeFilesystem):
+    async def execute(self, request):
+        raise RuntimeError("unexpected filesystem defect")
+
+
 def budget(**values: int) -> ExecutionBudget:
     defaults = {
         "max_llm_calls": 2,
@@ -130,6 +146,62 @@ async def test_inventory_is_bounded_deterministic_and_ignores_generated_director
     ]
     assert result["counters"] == {"llm_calls": 0, "tool_calls": 2, "repair_attempts": 0}
     assert model.structured_inputs == []
+
+
+@pytest.mark.anyio
+async def test_empty_inventory_and_depth_entry_boundaries_are_deterministic():
+    empty = await run_explore(
+        "what files are in this project?", FakeFilesystem({".": []}), FakeModel([])
+    )
+    assert empty["explore"]["inventory"] == []
+    assert empty["explore"]["inventory_truncated"] is False
+
+    bounded = await run_explore(
+        "what files are in this project?",
+        FakeFilesystem(
+            {
+                ".": [
+                    {"name": "a", "type": "directory"},
+                    {"name": "b", "type": "file"},
+                ],
+                "a": [{"name": "nested.py", "type": "file"}],
+            }
+        ),
+        FakeModel([]),
+        config=ExploreConfig(max_depth=0, max_inventory_entries=1),
+    )
+    assert bounded["explore"]["inventory"] == [{"path": "a", "kind": "directory"}]
+    assert bounded["explore"]["inventory_truncated"] is True
+
+
+@pytest.mark.anyio
+async def test_duplicate_inventory_entries_are_not_revisited_or_exposed_twice():
+    result = await run_explore(
+        "what files are in this project?",
+        FakeFilesystem(
+            {
+                ".": [
+                    {"name": "same.py", "type": "file"},
+                    {"name": "same.py", "type": "file"},
+                ]
+            }
+        ),
+        FakeModel([]),
+    )
+
+    assert result["explore"]["inventory"] == [{"path": "same.py", "kind": "file"}]
+
+
+@pytest.mark.parametrize("name", ["C:outside.py", "bad\x00name.py"])
+@pytest.mark.anyio
+async def test_unsafe_external_inventory_names_fail_closed(name):
+    result = await run_explore(
+        "what files are in this project?",
+        FakeFilesystem({".": [{"name": name, "type": "file"}]}),
+        FakeModel([]),
+    )
+
+    assert result["failure"]["code"] == "malformed_tool_result"
 
 
 @pytest.mark.anyio
@@ -231,6 +303,7 @@ async def test_tool_and_model_failures_are_structured_and_no_retries_occur():
     model = FakeModel([])
     result = await run_explore("where is it?", filesystem, model)
     assert result["failure"]["code"] == "mcp_failure"
+    assert result["counters"]["tool_calls"] == 1
     assert not model.structured_inputs
 
     model.fail_structured = True
@@ -238,6 +311,69 @@ async def test_tool_and_model_failures_are_structured_and_no_retries_occur():
     result = await run_explore("where is it?", filesystem, model)
     assert result["failure"]["code"] == "model_failure"
     assert len(model.structured_inputs) == 1
+
+
+@pytest.mark.anyio
+async def test_policy_violations_and_programming_errors_propagate():
+    filesystem = FakeFilesystem({".": []})
+    registry = ToolRegistry()
+    registry.register(filesystem)
+    with pytest.raises(PolicyViolationError):
+        await build_graph(budget()).ainvoke(
+            {"task_id": "task-1", "user_request": "where is it?"},
+            context=OrchestrationContext(
+                model=FakeModel([]),
+                tools=ToolRuntime(registry, policies=PolicyChain([RejectingPolicy()])),
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="unexpected filesystem defect"):
+        await run_explore("where is it?", ExplodingFilesystem({".": []}), FakeModel([]))
+
+
+@pytest.mark.anyio
+async def test_explanation_failure_clears_file_contents_and_preserves_model_reason():
+    filesystem = FakeFilesystem(
+        {".": [{"name": "a.py", "type": "file"}]}, {"a.py": "content"}
+    )
+    model = FakeModel(["a.py"])
+    model.fail_text = True
+    result = await run_explore("where is it?", filesystem, model)
+
+    assert result["failure"]["code"] == "model_failure"
+    assert result["explore"]["file_contents"] == []
+
+
+@pytest.mark.anyio
+async def test_model_budget_stops_before_explanation_call():
+    filesystem = FakeFilesystem(
+        {".": [{"name": "a.py", "type": "file"}]}, {"a.py": "content"}
+    )
+    model = FakeModel(["a.py"])
+    result = await run_explore(
+        "where is it?",
+        filesystem,
+        model,
+        execution_budget=budget(max_llm_calls=1),
+    )
+
+    assert result["failure"]["code"] == "model_budget_exhausted"
+    assert len(model.structured_inputs) == 1
+    assert not model.text_inputs
+
+
+@pytest.mark.anyio
+async def test_model_timeout_has_distinct_structured_failure():
+    class TimeoutModel(FakeModel):
+        async def generate_structured(self, **kwargs):
+            raise ModelTimeoutError("timed out")
+
+    result = await run_explore(
+        "where is it?",
+        FakeFilesystem({".": []}),
+        TimeoutModel([]),
+    )
+    assert result["failure"]["code"] == "model_timeout"
 
 
 @pytest.mark.anyio
