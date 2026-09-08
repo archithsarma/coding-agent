@@ -9,7 +9,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING
 
 from coding_agent.domain import (
-    PolicyViolationError,
+    InvalidRequestError,
     ToolErrorInfo,
     ToolRequest,
     ToolResult,
@@ -49,15 +49,19 @@ class FilesystemMcpAdapter:
         self._max_read_bytes = max_read_bytes
         self._timeout = operation_timeout_seconds
         self._exit_stack: AsyncExitStack | None = None
+        self._active_connection: McpConnection | None = None
         self._tools: tuple[InternalTool, ...] = ()
 
     async def __aenter__(self) -> FilesystemMcpAdapter:
+        if self._exit_stack is not None or self._active_connection is not None:
+            raise RuntimeError("filesystem adapter is already connected")
         stack = AsyncExitStack()
         await stack.__aenter__()
         try:
             connection = await stack.enter_async_context(self._connection)
+            self._active_connection = connection
             available = {tool.name for tool in await self._discover(connection)}
-            required = {"read_text_file", "list_directory"}
+            required = {"read_text_file", "list_directory", "get_file_info"}
             missing = required - available
             if missing:
                 raise McpToolUnavailableError(
@@ -71,6 +75,9 @@ class FilesystemMcpAdapter:
             self._exit_stack = stack
             return self
         except BaseException:
+            self._active_connection = None
+            self._exit_stack = None
+            self._tools = ()
             await stack.__aexit__(None, None, None)
             raise
 
@@ -80,10 +87,12 @@ class FilesystemMcpAdapter:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if self._exit_stack is not None:
-            await self._exit_stack.__aexit__(exc_type, exc_value, traceback)
-            self._exit_stack = None
-            self._tools = ()
+        stack = self._exit_stack
+        self._exit_stack = None
+        self._active_connection = None
+        self._tools = ()
+        if stack is not None:
+            await stack.__aexit__(exc_type, exc_value, traceback)
 
     def register_tools(self, registry: ToolRegistry) -> None:
         if self._exit_stack is None:
@@ -108,16 +117,17 @@ class FilesystemMcpAdapter:
         external_name: str,
         path: Path,
     ) -> McpCallResult | ToolResult:
+        connection = self._active_connection
+        if connection is None:
+            raise RuntimeError("filesystem adapter is disconnected")
         try:
             async with asyncio.timeout(self._timeout):
-                result = await self._connection.call_tool(
-                    external_name, {"path": str(path)}
-                )
+                result = await connection.call_tool(external_name, {"path": str(path)})
                 if result.is_error:
                     return _failure(
                         request,
                         "mcp_tool_error",
-                        _error_text(result) or f"MCP tool '{external_name}' failed",
+                        _extract_text(result) or f"MCP tool '{external_name}' failed",
                     )
                 return result
         except TimeoutError:
@@ -131,16 +141,11 @@ class FilesystemMcpAdapter:
         except McpIntegrationError as error:
             return _failure(request, "mcp_tool_error", str(error))
 
-    def resolve_path(self, request: ToolRequest) -> tuple[str, Path] | ToolResult:
+    def resolve_path(self, request: ToolRequest) -> tuple[str, Path]:
         raw_path = request.arguments.get("path")
         if not isinstance(raw_path, str):
-            return _failure(
-                request, "invalid_path", "filesystem requests require a string path"
-            )
-        try:
-            return raw_path, self._path_policy.resolver.resolve(raw_path)
-        except PolicyViolationError as error:
-            return _failure(request, "policy_violation", str(error))
+            raise InvalidRequestError("filesystem requests require a string path")
+        return raw_path, self._path_policy.resolve_path(raw_path)
 
 
 class _FilesystemListTool:
@@ -156,13 +161,11 @@ class _FilesystemListTool:
 
     async def execute(self, request: ToolRequest) -> ToolResult:
         resolved = self._adapter.resolve_path(request)
-        if isinstance(resolved, ToolResult):
-            return resolved
         raw_path, path = resolved
         result = await self._adapter._invoke(request, "list_directory", path)
         if isinstance(result, ToolResult):
             return result
-        text = _result_text(result)
+        text = _extract_text(result)
         if text is None:
             return _failure(
                 request, "malformed_response", "filesystem listing lacked text content"
@@ -202,20 +205,25 @@ class _FilesystemReadTool:
 
     async def execute(self, request: ToolRequest) -> ToolResult:
         resolved = self._adapter.resolve_path(request)
-        if isinstance(resolved, ToolResult):
-            return resolved
         raw_path, path = resolved
-        try:
-            if path.stat().st_size > self._adapter._max_read_bytes:
-                return _failure(
-                    request, "file_too_large", "file exceeds configured read limit"
-                )
-        except OSError:
-            pass
+        metadata = await self._adapter._invoke(request, "get_file_info", path)
+        if isinstance(metadata, ToolResult):
+            return metadata
+        size = _extract_file_size(metadata)
+        if size is None:
+            return _failure(
+                request,
+                "malformed_response",
+                "filesystem metadata lacked a reliable file size",
+            )
+        if size > self._adapter._max_read_bytes:
+            return _failure(
+                request, "file_too_large", "file exceeds configured read limit"
+            )
         result = await self._adapter._invoke(request, "read_text_file", path)
         if isinstance(result, ToolResult):
             return result
-        text = _result_text(result)
+        text = _extract_text(result)
         if text is None:
             return _failure(
                 request, "malformed_response", "filesystem read lacked text content"
@@ -227,7 +235,7 @@ class _FilesystemReadTool:
         )
 
 
-def _result_text(result: McpCallResult) -> str | None:
+def _extract_text(result: McpCallResult) -> str | None:
     if isinstance(result.structured_content, dict):
         content = result.structured_content.get("content")
         if isinstance(content, str):
@@ -240,16 +248,24 @@ def _result_text(result: McpCallResult) -> str | None:
     return None
 
 
-def _error_text(result: McpCallResult) -> str | None:
-    if isinstance(result.structured_content, dict):
-        content = result.structured_content.get("content")
-        if isinstance(content, str):
-            return content
-    for item in result.content:
-        if isinstance(item, dict) and item.get("type") == "text":
-            text = item.get("text")
-            if isinstance(text, str):
-                return text
+def _extract_file_size(result: McpCallResult) -> int | None:
+    structured = result.structured_content
+    if isinstance(structured, dict):
+        size = structured.get("size")
+        if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+            return size
+
+    text = _extract_text(result)
+    if text is None:
+        return None
+    for line in text.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip().lower() == "size":
+            try:
+                size = int(value.strip())
+            except ValueError:
+                return None
+            return size if size >= 0 else None
     return None
 
 

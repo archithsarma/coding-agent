@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 
-from coding_agent.domain import PolicyViolationError, ToolRequest
+from coding_agent.domain import InvalidRequestError, PolicyViolationError, ToolRequest
 
 if TYPE_CHECKING:
     from coding_agent.tools.descriptor import ToolDescriptor
@@ -55,6 +55,9 @@ class WorkspacePathPolicy:
             else WorkspacePathResolver(workspace_root)
         )
 
+    def resolve_path(self, relative_path: str) -> Path:
+        return self.resolver.resolve(relative_path)
+
     def validate_request(
         self, descriptor: ToolDescriptor, request: ToolRequest
     ) -> None:
@@ -62,8 +65,8 @@ class WorkspacePathPolicy:
             return
         raw_path = request.arguments.get("path")
         if not isinstance(raw_path, str):
-            raise PolicyViolationError("filesystem requests require a string path")
-        self.resolver.resolve(raw_path)
+            raise InvalidRequestError("filesystem requests require a string path")
+        self.resolve_path(raw_path)
 
     async def validate(self, descriptor: ToolDescriptor, request: ToolRequest) -> None:
         self.validate_request(descriptor, request)
