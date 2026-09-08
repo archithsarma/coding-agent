@@ -6,7 +6,9 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import signal
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +26,7 @@ from mcp_types import (
 from coding_agent.domain import PolicyViolationError
 from coding_agent.policies.workspace import WorkspacePathResolver
 from coding_agent.shell import (
+    ALLOWED_EXECUTABLES,
     DEFAULT_MAX_ARGUMENT_LENGTH,
     DEFAULT_MAX_ARGUMENTS,
     DEFAULT_MAX_STDERR_BYTES,
@@ -73,9 +76,11 @@ class ShellCommandExecutor:
         self, invocation: ShellInvocation, *, cwd: Path
     ) -> ShellExecutionResult:
         started = time.monotonic()
+        executable = _resolve_executable(invocation.argv[0])
+        process_argv = (executable, *invocation.argv[1:])
         try:
             process = await asyncio.create_subprocess_exec(
-                *invocation.argv,
+                *process_argv,
                 cwd=cwd,
                 env=_execution_environment(),
                 stdin=asyncio.subprocess.DEVNULL,
@@ -156,6 +161,25 @@ class ShellCommandExecutor:
             else:  # pragma: no cover - target environment is Unix
                 process.kill()
             await process.wait()
+
+
+def _resolve_executable(executable: str) -> str:
+    """Resolve approved logical commands using the server's trusted environment."""
+
+    if os.path.dirname(executable):
+        return executable
+    if executable not in ALLOWED_EXECUTABLES:
+        return executable
+
+    interpreter_bin = Path(sys.executable).parent
+    environment_path = _execution_environment().get("PATH", "")
+    trusted_path = os.pathsep.join((str(interpreter_bin), environment_path))
+    resolved = shutil.which(executable, path=trusted_path)
+    if resolved is None:
+        raise ShellProcessError(
+            f"approved executable '{executable}' could not be resolved"
+        )
+    return resolved
 
 
 async def _read_limited(stream: asyncio.StreamReader, limit: int) -> tuple[bytes, bool]:

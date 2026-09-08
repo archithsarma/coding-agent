@@ -1,8 +1,15 @@
 import asyncio
+import os
 import sys
 from pathlib import Path
 
-from coding_agent.mcp_servers.shell import ShellCommandExecutor
+import pytest
+
+from coding_agent.mcp_servers.shell import (
+    ShellCommandExecutor,
+    ShellProcessError,
+    _resolve_executable,
+)
 from coding_agent.shell import ShellInvocation
 
 
@@ -124,3 +131,50 @@ def test_execution_environment_excludes_unapproved_variables(monkeypatch) -> Non
     from coding_agent.mcp_servers.shell import _execution_environment
 
     assert "SECRET_SHOULD_NOT_CROSS_BOUNDARY" not in _execution_environment()
+
+
+def test_approved_logical_executable_resolves_from_server_interpreter_bin(
+    tmp_path: Path, monkeypatch
+) -> None:
+    interpreter = tmp_path / "python"
+    interpreter.touch()
+    executable = tmp_path / "pytest"
+    executable.touch()
+    executable.chmod(0o700)
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+    monkeypatch.setenv("PATH", os.defpath)
+
+    assert _resolve_executable("pytest") == str(executable)
+
+
+def test_executor_runs_approved_logical_command_without_venv_on_child_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("PATH", os.defpath)
+
+    result = run(
+        ShellCommandExecutor().execute(
+            ShellInvocation(argv=("pytest", "--version"), cwd=".", timeout_seconds=2),
+            cwd=tmp_path,
+        )
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("pytest ")
+
+
+def test_missing_approved_executable_has_explicit_resolution_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    interpreter = tmp_path / "python"
+    interpreter.touch()
+    monkeypatch.setattr(sys, "executable", str(interpreter))
+    monkeypatch.setenv("PATH", os.defpath)
+
+    with pytest.raises(ShellProcessError, match="approved executable 'pytest'"):
+        _resolve_executable("pytest")
+
+
+def test_absolute_and_arbitrary_executables_are_not_resolved_by_allowlist() -> None:
+    assert _resolve_executable("/trusted/tool") == "/trusted/tool"
+    assert _resolve_executable("arbitrary-tool") == "arbitrary-tool"

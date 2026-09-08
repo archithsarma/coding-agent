@@ -47,6 +47,7 @@ def test_shell_policy_allows_approved_commands(argv: list[str]) -> None:
         ["sh"],
         ["python", "-c", "print('unsafe')"],
         ["unknown-tool"],
+        ["/absolute/path/to/pytest"],
         ["git", "commit"],
         ["git", "reset"],
         ["git", "-C", ".", "status"],
