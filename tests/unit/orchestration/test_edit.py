@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,11 @@ from coding_agent.domain import (
     ToolErrorInfo,
     ToolRequest,
     ToolResult,
+)
+from coding_agent.memory import (
+    InMemorySessionMemory,
+    PreferencePersistenceError,
+    SQLitePreferenceStore,
 )
 from coding_agent.model import ModelError, ModelTimeoutError
 from coding_agent.orchestration.context import OrchestrationContext
@@ -258,6 +264,10 @@ async def run_edit(
     max_llm_calls: int = 2,
     max_repair_attempts: int = 0,
     shell_exit_codes: list[int] | None = None,
+    session_memory=None,
+    preference_store=None,
+    session_id="test-session",
+    user_request="add title validation",
 ):
     return await build_graph(
         budget(
@@ -266,12 +276,16 @@ async def run_edit(
             max_repair_attempts=max_repair_attempts,
         )
     ).ainvoke(
-        {"task_id": "task-1", "user_request": "add title validation"},
+        {"task_id": "task-1", "user_request": user_request},
         context=OrchestrationContext(
             model=model,
             tools=runtime(filesystem, tmp_path, shell_exit_codes),
             path_policy=WorkspacePathPolicy(tmp_path),
             edit_config=EditConfig(max_write_bytes=1000),
+            session_memory=session_memory or InMemorySessionMemory(),
+            preference_store=preference_store
+            or SQLitePreferenceStore(tmp_path / "preferences.sqlite3"),
+            session_id=session_id,
         ),
     )
 
@@ -299,6 +313,74 @@ async def test_edit_happy_path_has_two_model_calls_and_operation_record(tmp_path
     }
     assert len(model.structured_inputs) == 2
     assert "def task" in model.structured_inputs[1]
+
+
+@pytest.mark.anyio
+async def test_edit_prompt_receives_persisted_preferences_with_precedence(
+    tmp_path: Path,
+):
+    store = SQLitePreferenceStore(tmp_path / "preferences.sqlite3")
+    store.remember_preference(
+        "documentation", "Always add docstrings when editing functions."
+    )
+    store.close()
+    store = SQLitePreferenceStore(tmp_path / "preferences.sqlite3")
+    model = EditModel()
+    await run_edit(
+        tmp_path,
+        FakeFilesystem({"routes/tasks.py": "def task():\n    return []\n"}),
+        model,
+        max_tool_calls=9,
+        preference_store=store,
+        user_request="change this function but do not add a docstring",
+    )
+
+    planner_input = json.loads(model.structured_inputs[1])
+    assert planner_input["active_preferences"] == [
+        "Always add docstrings when editing functions."
+    ]
+    assert planner_input["preference_precedence"] == (
+        "current request overrides preferences"
+    )
+
+
+class FailingPreferenceStore:
+    def retrieve_preferences(self, categories):
+        raise PreferencePersistenceError("database unavailable")
+
+
+@pytest.mark.anyio
+async def test_preference_retrieval_failure_fails_open_for_edit(tmp_path: Path):
+    model = EditModel()
+    result = await run_edit(
+        tmp_path,
+        FakeFilesystem({"routes/tasks.py": "def task():\n    return []\n"}),
+        model,
+        max_tool_calls=9,
+        preference_store=FailingPreferenceStore(),
+    )
+
+    assert result["current_node"] == "edit_complete"
+    assert json.loads(model.structured_inputs[1])["active_preferences"] == []
+
+
+@pytest.mark.anyio
+async def test_edit_records_compact_session_event(tmp_path: Path):
+    session_memory = InMemorySessionMemory()
+    model = EditModel()
+    result = await run_edit(
+        tmp_path,
+        FakeFilesystem({"routes/tasks.py": "def task():\n    return []\n"}),
+        model,
+        max_tool_calls=9,
+        session_memory=session_memory,
+    )
+
+    events = session_memory.list_events("test-session")
+    assert result["current_node"] == "edit_complete"
+    assert len(events) == 1
+    assert events[0].files == ("routes/tasks.py",)
+    assert "def task" not in events[0].summary
 
 
 @pytest.mark.anyio

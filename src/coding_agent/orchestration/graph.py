@@ -6,11 +6,13 @@ from typing import Any, Literal, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.runtime import Runtime
 from pydantic import ValidationError
 
 import coding_agent.orchestration.correction as correction_nodes
 import coding_agent.orchestration.run as run_nodes
 from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
+from coding_agent.memory import PreferencePersistenceError, capture_explicit_preference
 from coding_agent.orchestration.context import OrchestrationContext
 from coding_agent.orchestration.edit import (
     EDIT_COMMIT,
@@ -162,7 +164,9 @@ def build_graph(
     budget = default_execution_budget or _DEFAULT_BUDGET
     budget_state = budget.model_dump(mode="json")
 
-    def initialize(state: OrchestrationState) -> dict[str, object]:
+    def initialize(
+        state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+    ) -> dict[str, object]:
         task_id = state.get("task_id")
         user_request = state.get("user_request")
         if not isinstance(task_id, str) or not task_id.strip():
@@ -179,6 +183,34 @@ def build_graph(
         counters = state.get("counters", _DEFAULT_COUNTERS)
         if not _valid_counters(counters):
             raise InvalidRequestError("counters must contain non-negative integers")
+        memory: dict[str, object] = {}
+        if runtime.context is not None:
+            candidate = capture_explicit_preference(user_request)
+            if candidate is not None:
+                try:
+                    record = runtime.context.preference_store.remember_preference(
+                        candidate.category, candidate.value
+                    )
+                except PreferencePersistenceError as error:
+                    return {
+                        "failure": {
+                            "code": "memory_persistence_failed",
+                            "message": str(error),
+                            "node": INITIALIZE,
+                            "retryable": False,
+                        },
+                        "memory": {
+                            "preference_saved": False,
+                            "preference_category": candidate.category,
+                            "answer": "I couldn't save that preference.",
+                        },
+                        "current_node": INITIALIZE,
+                    }
+                memory = {
+                    "preference_saved": True,
+                    "preference_category": record.category,
+                    "answer": f"Saved your {record.category} preference.",
+                }
         return {
             "task_id": task_id,
             "user_request": user_request,
@@ -190,6 +222,7 @@ def build_graph(
             "explore": {},
             "run": {},
             "edit": {},
+            "memory": memory,
             "current_node": INITIALIZE,
         }
 

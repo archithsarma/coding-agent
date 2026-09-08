@@ -49,7 +49,7 @@ boundary, and then run the configured verification suite (`pytest`, `ruff
 check .`, and `mypy src`) fail-fast. A failed check may trigger a bounded,
 exact-replacement auto-repair within the originally selected files. The
 maximum number of repair attempts is configurable through `ExecutionBudget`
-and defaults to two. Undo and persistent memory are not enabled.
+and defaults to two.
 
 Correction requests (`undo`, `undo that`, `revert that`, `revert the last
 change`, or `that's wrong`) deterministically revert the latest safely
@@ -57,6 +57,32 @@ reversible Edit in the current session. Undo re-reads every target through the
 filesystem MCP boundary and reports a conflict instead of overwriting later
 workspace changes. It restores known content transactionally, does not run the
 verification suite, and does not provide redo or persistent cross-session undo.
+
+The agent has three memory tiers:
+
+- Working memory is the current typed LangGraph state. Temporary source content
+  is cleared as trajectories finish; no second working-memory database exists.
+- Session memory is an in-memory, session-ID-isolated, bounded list of compact
+  Explore/Run/Edit/Correction outcome events. It stores paths and metadata, not
+  raw source, model prompts/responses, or complete command output. Oldest events
+  are deterministically evicted when event or serialized-byte limits are hit.
+- Persistent memory is an injected SQLite `PreferenceStore` for explicit,
+  bounded coding preferences only. The database path is configurable and should
+  be placed in application data, outside the target workspace. SQLite uses
+  parameterized SQL, a schema version, transactions, and short-lived
+  connections.
+
+Preferences are captured only from high-confidence explicit wording such as
+`Remember: always use type hints.` Ordinary feedback is not persisted. Edit
+planning and repair retrieve only relevant style/documentation/formatting
+preferences; the current request is always higher precedence, and preference
+text cannot authorize tools, files, commands, or scope changes. Retrieval is
+fail-open with a warning, while an explicit persistence failure is surfaced.
+
+Context growth follows HOT/WARM/COLD boundaries: current request, graph state,
+and current filesystem reads are hot; recent compact events and relevant
+preferences are warm; old events are evicted and source is re-read when needed.
+Current filesystem content remains the source of truth.
 
 ## Checks
 

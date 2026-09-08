@@ -9,6 +9,7 @@ from langgraph.runtime import Runtime
 from pydantic import JsonValue
 
 from coding_agent.domain import ToolRequest, ToolResult, VerificationKind
+from coding_agent.memory import SessionEvent
 from coding_agent.orchestration.context import OrchestrationContext
 from coding_agent.orchestration.state import OrchestrationState, RunState
 from coding_agent.orchestration.verification import (
@@ -188,23 +189,72 @@ def _tool_result_from_state(data: object) -> ToolResult:
     )
 
 
-def complete(state: OrchestrationState) -> dict[str, object]:
+def complete(
+    state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+) -> dict[str, object]:
     from coding_agent.domain import VerificationResult
 
     raw = _run(state).get("verification")
     if not isinstance(raw, dict):
         raise RuntimeError("Run state is missing a verification result")
     verification = VerificationResult.model_validate(raw)
+    _record_session_event(
+        runtime,
+        state,
+        outcome="succeeded" if verification.passed else "failed",
+        summary=f"ran {verification.kind.value}",
+        verification_status="passed" if verification.passed else "failed",
+    )
     return {
         "run": {**_run(state), "answer": user_facing_summary(verification)},
         "current_node": RUN_COMPLETE,
     }
 
 
-def failed(state: OrchestrationState) -> dict[str, object]:
+def failed(
+    state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+) -> dict[str, object]:
     failure = state.get("failure")
     message = failure.get("message") if isinstance(failure, dict) else "run failed"
+    failure_code = (
+        failure.get("code", "unknown") if isinstance(failure, dict) else "unknown"
+    )
+    _record_session_event(
+        runtime,
+        state,
+        outcome="failed",
+        summary=f"run failed: {failure_code}",
+    )
     return {
         "run": {**_run(state), "answer": f"Run failed: {message}", "tool_result": None},
         "current_node": RUN_FAILED,
     }
+
+
+def _record_session_event(
+    runtime: Runtime[OrchestrationContext],
+    state: OrchestrationState,
+    *,
+    outcome: str,
+    summary: str,
+    verification_status: str | None = None,
+) -> None:
+    if runtime.context is None:
+        return
+    command = _run(state).get("command")
+    argv = command.get("argv", []) if isinstance(command, dict) else []
+    command_text = (
+        " ".join(item for item in argv if isinstance(item, str))
+        if isinstance(argv, list)
+        else ""
+    )
+    runtime.context.session_memory.record(
+        SessionEvent(
+            session_id=runtime.context.session_id,
+            trajectory="run",
+            summary=summary[:500],
+            commands=(command_text,),
+            outcome=outcome,
+            verification_status=verification_status,
+        )
+    )

@@ -1,6 +1,8 @@
 import pytest
 
 from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
+from coding_agent.memory import SQLitePreferenceStore
+from coding_agent.orchestration.context import OrchestrationContext
 from coding_agent.orchestration.graph import (
     BOUNDARY_UNRESOLVED,
     build_graph,
@@ -61,3 +63,26 @@ async def test_graph_rejects_missing_required_request_state(field: str) -> None:
 
     with pytest.raises(InvalidRequestError):
         await build_graph().ainvoke(state)
+
+
+@pytest.mark.anyio
+async def test_explicit_remember_request_persists_without_new_trajectory(
+    tmp_path,
+) -> None:
+    store = SQLitePreferenceStore(tmp_path / "preferences.sqlite3")
+
+    result = await build_graph().ainvoke(
+        {
+            "task_id": "task-1",
+            "user_request": "Remember: always use type hints.",
+        },
+        context=OrchestrationContext(
+            model=object(),
+            tools=object(),
+            preference_store=store,
+        ),
+    )
+
+    assert result["current_node"] == BOUNDARY_UNRESOLVED
+    assert result["memory"]["preference_saved"] is True
+    assert store.list_preferences()[0].value == "always use type hints."

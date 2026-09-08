@@ -89,6 +89,8 @@ class EditState(TypedDict, total=False):
     failed_verification: dict[str, JsonValue]
     failure_fingerprints: list[str]
     last_repair_fingerprint: str
+    active_preferences: list[str]
+    recent_session_events: list[JsonValue]
 
 
 class OrchestrationState(TypedDict, total=False):
@@ -106,3 +108,4 @@ class OrchestrationState(TypedDict, total=False):
     run: RunState
     edit: EditState
     correction: CorrectionState
+    memory: dict[str, JsonValue]

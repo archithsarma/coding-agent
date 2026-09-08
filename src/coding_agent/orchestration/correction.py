@@ -20,6 +20,7 @@ from coding_agent.domain import (
 )
 from coding_agent.editing import ContentRestoreTransaction, RestoreItem
 from coding_agent.journal import ReversibleOperation
+from coding_agent.memory import SessionEvent
 from coding_agent.orchestration.context import OrchestrationContext
 from coding_agent.orchestration.state import CorrectionState, OrchestrationState
 from coding_agent.policies import WorkspacePathPolicy
@@ -286,6 +287,13 @@ def complete(
         created_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
     )
+    _record_session_event(
+        runtime,
+        files=tuple(change.path for change in changes),
+        operation_id=record.operation_id,
+        outcome="succeeded",
+        summary="reverted the previous edit",
+    )
     return {
         "correction": {
             **_correction(state),
@@ -299,7 +307,9 @@ def complete(
     }
 
 
-def failed(state: OrchestrationState) -> dict[str, object]:
+def failed(
+    state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+) -> dict[str, object]:
     failure = state.get("failure") or {}
     details = failure.get("details", {}) if isinstance(failure, dict) else {}
     if isinstance(details, dict) and details.get("partial_mutation_risk"):
@@ -314,6 +324,20 @@ def failed(state: OrchestrationState) -> dict[str, object]:
             "Undo failed: "
             f"{failure.get('message', 'no reversible operation is available')}"
         )
+    changed_paths = tuple(
+        path
+        for item in _correction(state).get("file_changes", [])
+        if isinstance(item, dict)
+        for path in [item.get("path")]
+        if isinstance(path, str)
+    )
+    _record_session_event(
+        runtime,
+        files=changed_paths,
+        operation_id=str(_correction(state).get("operation_id", "")) or None,
+        outcome="failed",
+        summary=f"undo failed: {failure.get('code', 'unknown')}",
+    )
     return {
         "correction": {**_correction(state), "answer": answer},
         "current_node": CORRECTION_FAILED,
@@ -370,3 +394,25 @@ def _require_path_policy(context: OrchestrationContext) -> WorkspacePathPolicy:
     if context.path_policy is None:
         raise RuntimeError("Correction requires an explicit workspace path policy")
     return context.path_policy
+
+
+def _record_session_event(
+    runtime: Runtime[OrchestrationContext],
+    *,
+    files: tuple[str, ...],
+    operation_id: str | None,
+    outcome: str,
+    summary: str,
+) -> None:
+    if runtime.context is None:
+        return
+    runtime.context.session_memory.record(
+        SessionEvent(
+            session_id=runtime.context.session_id,
+            trajectory="correction",
+            summary=summary[:500],
+            files=files[:50],
+            outcome=outcome,
+            operation_id=operation_id,
+        )
+    )

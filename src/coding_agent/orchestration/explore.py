@@ -12,6 +12,7 @@ from langgraph.runtime import Runtime
 from pydantic import BaseModel, Field
 
 from coding_agent.domain import ToolRequest, ToolResult
+from coding_agent.memory import SessionEvent
 from coding_agent.model import (
     ModelError,
     ModelProviderError,
@@ -275,12 +276,20 @@ def plan_next(
     )
 
 
-def answer_inventory(state: OrchestrationState) -> dict[str, object]:
+def answer_inventory(
+    state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+) -> dict[str, object]:
     explore = state["explore"]
     lines = [f"- {entry['path']} ({entry['kind']})" for entry in explore["inventory"]]
     if explore.get("inventory_truncated"):
         lines.append("- Inventory truncated at configured safety limits.")
     answer = "Project inventory:\n" + ("\n".join(lines) if lines else "(empty)")
+    _record_session_event(
+        runtime,
+        files=tuple(entry["path"] for entry in explore["inventory"][:50]),
+        outcome="succeeded",
+        summary=f"inspected {len(explore['inventory'])} inventory entries",
+    )
     return {
         "explore": {**explore, "answer": answer, "file_contents": []},
         "current_node": EXPLORE_ANSWER_INVENTORY,
@@ -370,11 +379,19 @@ def select_next(
     )
 
 
-def answer_zero(state: OrchestrationState) -> dict[str, object]:
+def answer_zero(
+    state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+) -> dict[str, object]:
     suffix = (
         " The bounded inventory was truncated."
         if state["explore"].get("inventory_truncated")
         else ""
+    )
+    _record_session_event(
+        runtime,
+        files=tuple(_explore(state).get("selected_paths", [])),
+        outcome="succeeded",
+        summary="no relevant files were selected",
     )
     return {
         "explore": {
@@ -485,6 +502,12 @@ async def explain(
         )
     except ModelError as error:
         return _model_failure(state, error, EXPLORE_EXPLAIN)
+    _record_session_event(
+        runtime,
+        files=tuple(explore.get("selected_paths", [])),
+        outcome="succeeded",
+        summary="answered a code question from inspected files",
+    )
     return {
         "counters": state["counters"],
         "explore": {**explore, "answer": result.text, "file_contents": []},
@@ -492,7 +515,19 @@ async def explain(
     }
 
 
-def failed(state: OrchestrationState) -> dict[str, object]:
+def failed(
+    state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+) -> dict[str, object]:
+    failure = state.get("failure")
+    failure_code = (
+        failure.get("code", "unknown") if isinstance(failure, dict) else "unknown"
+    )
+    _record_session_event(
+        runtime,
+        files=tuple(_explore(state).get("selected_paths", [])),
+        outcome="failed",
+        summary=(f"explore failed: {failure_code}"),
+    )
     return {
         "explore": {**_explore(state), "file_contents": []},
         "current_node": EXPLORE_FAILED,
@@ -525,3 +560,23 @@ def _model_failure(
     return _failure(state, code=code, message=str(error), node=node) | {
         "counters": state["counters"]
     }
+
+
+def _record_session_event(
+    runtime: Runtime[OrchestrationContext],
+    *,
+    files: tuple[str, ...],
+    outcome: str,
+    summary: str,
+) -> None:
+    if runtime.context is None:
+        return
+    runtime.context.session_memory.record(
+        SessionEvent(
+            session_id=runtime.context.session_id,
+            trajectory="explore",
+            summary=summary[:500],
+            files=files[:50],
+            outcome=outcome,
+        )
+    )
