@@ -2,6 +2,8 @@
 
 from collections.abc import Mapping
 
+from pydantic import JsonValue
+
 
 class DomainError(Exception):
     """Base error with a stable code and optional structured context."""
@@ -9,7 +11,7 @@ class DomainError(Exception):
     code = "domain_error"
 
     def __init__(
-        self, message: str, *, context: Mapping[str, object] | None = None
+        self, message: str, *, context: Mapping[str, JsonValue] | None = None
     ) -> None:
         super().__init__(message)
         self.context = dict(context or {})

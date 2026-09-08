@@ -62,6 +62,8 @@ class StdioMcpClient(McpConnection):
         self._client: Client | None = None
 
     async def __aenter__(self) -> StdioMcpClient:
+        if self._client is not None:
+            raise RuntimeError("MCP client is already connected")
         parameters = StdioServerParameters(
             command=self._settings.mcp_command,
             args=self._settings.server_arguments(self._workspace_root),
@@ -73,10 +75,16 @@ class StdioMcpClient(McpConnection):
         try:
             async with asyncio.timeout(self._settings.operation_timeout_seconds):
                 await client.__aenter__()
-        except TimeoutError as error:
-            raise McpTimeoutError("MCP server startup timed out") from error
-        except (MCPError, OSError, ValueError) as error:
-            raise McpConnectionError("MCP server connection failed") from error
+        except BaseException as error:
+            try:
+                await client.__aexit__(None, None, None)
+            except BaseException as cleanup_error:
+                error.add_note(f"MCP startup cleanup failed: {cleanup_error}")
+            if isinstance(error, TimeoutError):
+                raise McpTimeoutError("MCP server startup timed out") from error
+            if isinstance(error, (MCPError, OSError, ValueError)):
+                raise McpConnectionError("MCP server connection failed") from error
+            raise
         self._client = client
         return self
 
@@ -86,9 +94,10 @@ class StdioMcpClient(McpConnection):
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if self._client is not None:
-            await self._client.__aexit__(exc_type, exc_value, traceback)
-            self._client = None
+        client = self._client
+        self._client = None
+        if client is not None:
+            await client.__aexit__(exc_type, exc_value, traceback)
 
     async def list_tools(self) -> tuple[McpToolDescription, ...]:
         client = self._require_client()

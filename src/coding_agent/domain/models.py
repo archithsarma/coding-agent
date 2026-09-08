@@ -29,6 +29,12 @@ def _non_blank(value: str) -> str:
     return value
 
 
+def _optional_non_blank(value: str | None) -> str | None:
+    if value is not None:
+        _non_blank(value)
+    return value
+
+
 def _utc_datetime(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("datetime must be timezone-aware")
@@ -39,9 +45,11 @@ def _workspace_relative_path(value: str) -> str:
     normalized = value.replace("\\", "/")
     if not normalized.strip() or "\x00" in normalized:
         raise ValueError("path must be a non-blank path without null bytes")
+    windows_path = PureWindowsPath(normalized)
     if (
         PurePosixPath(normalized).is_absolute()
-        or PureWindowsPath(normalized).is_absolute()
+        or windows_path.is_absolute()
+        or windows_path.drive
     ):
         raise ValueError("path must be workspace-relative")
 
@@ -126,6 +134,9 @@ class OperationRecord(DomainModel):
 
     _validate_required_text = field_validator("operation_id", "user_request")(
         _non_blank
+    )
+    _validate_parent_operation_id = field_validator("parent_operation_id")(
+        _optional_non_blank
     )
     _validate_created_at = field_validator("created_at")(_utc_datetime)
     _validate_completed_at = field_validator("completed_at")(_utc_datetime)

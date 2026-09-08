@@ -60,6 +60,19 @@ def test_file_change_accepts_only_portable_workspace_relative_paths() -> None:
     with pytest.raises(ValidationError):
         FileChange(path="/absolute.py", change_type=ChangeType.CREATE)
 
+    with pytest.raises(ValidationError):
+        FileChange(path="C:relative.py", change_type=ChangeType.CREATE)
+
+
+def test_operation_parent_identifier_cannot_be_blank() -> None:
+    with pytest.raises(ValidationError):
+        OperationRecord(
+            operation_id="op-2",
+            trajectory=Trajectory.EDIT,
+            user_request="Update the file",
+            parent_operation_id=" ",
+        )
+
 
 def test_operation_lifecycle_requires_consistent_completion_timestamp() -> None:
     created_at = datetime(2026, 1, 1, tzinfo=UTC)

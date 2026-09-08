@@ -74,11 +74,14 @@ class FilesystemMcpAdapter:
             )
             self._exit_stack = stack
             return self
-        except BaseException:
+        except BaseException as error:
             self._active_connection = None
             self._exit_stack = None
             self._tools = ()
-            await stack.__aexit__(None, None, None)
+            try:
+                await stack.__aexit__(None, None, None)
+            except BaseException as cleanup_error:
+                error.add_note(f"filesystem startup cleanup failed: {cleanup_error}")
             raise
 
     async def __aexit__(
