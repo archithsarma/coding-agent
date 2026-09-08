@@ -33,6 +33,11 @@ working directories stay inside the workspace, and command timeouts and
 stdout/stderr limits are enforced. Shell execution is marked mutating because
 development tools may create caches or other files.
 
+Explore requests use a bounded LangGraph trajectory: inventory is breadth-first,
+generated directories are ignored, selected paths must come from the inventory,
+and file content is read through the filesystem MCP boundary before the model
+receives it. Repository paths and contents are treated as untrusted evidence.
+
 ## Checks
 
 ```bash

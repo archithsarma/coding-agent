@@ -36,6 +36,14 @@ def normalize_request(request: str) -> str:
     return re.sub(r"\s+", " ", request.strip()).casefold()
 
 
+def is_inventory_request(request: str) -> bool:
+    return normalize_request(request) in {
+        "what files are in this project?",
+        "list files",
+        "show me the project structure",
+    }
+
+
 def route_request(request: str) -> RoutingDecision:
     """Select a trajectory only when a small explicit rule is high-confidence."""
 
@@ -63,7 +71,7 @@ def route_request(request: str) -> RoutingDecision:
             reason="explicit verification request",
         )
     if normalized in _EXPLORE_EXACT or normalized.startswith(
-        ("what does ", "show me how ")
+        ("what does ", "show me how ", "where is ")
     ):
         return RoutingDecision(
             trajectory=Trajectory.EXPLORE,

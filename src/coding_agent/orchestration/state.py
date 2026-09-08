@@ -37,6 +37,26 @@ class ExecutionCounters(TypedDict):
     repair_attempts: int
 
 
+class InventoryEntry(TypedDict):
+    path: str
+    kind: Literal["file", "directory"]
+
+
+class ExploreFile(TypedDict):
+    path: str
+    content: str
+
+
+class ExploreState(TypedDict, total=False):
+    mode: Literal["inventory", "code_question"]
+    inventory: list[InventoryEntry]
+    inventory_truncated: bool
+    directories_visited: int
+    selected_paths: list[str]
+    file_contents: list[ExploreFile]
+    answer: str
+
+
 class OrchestrationState(TypedDict, total=False):
     """JSON-shaped state shared by LangGraph nodes."""
 
@@ -48,3 +68,4 @@ class OrchestrationState(TypedDict, total=False):
     execution_budget: dict[str, int | float]
     counters: ExecutionCounters
     failure: dict[str, JsonValue] | None
+    explore: ExploreState

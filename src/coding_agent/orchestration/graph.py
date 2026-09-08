@@ -9,14 +9,37 @@ from langgraph.graph.state import CompiledStateGraph
 from pydantic import ValidationError
 
 from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
+from coding_agent.orchestration.context import OrchestrationContext
+from coding_agent.orchestration.explore import (
+    EXPLORE_ANSWER_INVENTORY,
+    EXPLORE_ANSWER_ZERO,
+    EXPLORE_EXPLAIN,
+    EXPLORE_FAILED,
+    EXPLORE_INVENTORY,
+    EXPLORE_PLAN,
+    EXPLORE_READ,
+    EXPLORE_SELECT,
+    answer_inventory,
+    answer_zero,
+    explain,
+    failed,
+    inventory,
+    inventory_next,
+    plan,
+    plan_next,
+    read,
+    read_next,
+    select,
+    select_next,
+)
 from coding_agent.orchestration.routing import route_request
 from coding_agent.orchestration.state import (
     ExecutionCounters,
     OrchestrationState,
 )
 
-BoundaryName = Literal[
-    "route_explore",
+RouteTarget = Literal[
+    "explore_inventory",
     "route_edit",
     "route_run",
     "route_correction",
@@ -25,15 +48,15 @@ BoundaryName = Literal[
 
 INITIALIZE = "initialize"
 ROUTE = "route"
-BOUNDARY_EXPLORE: BoundaryName = "route_explore"
-BOUNDARY_EDIT: BoundaryName = "route_edit"
-BOUNDARY_RUN: BoundaryName = "route_run"
-BOUNDARY_CORRECTION: BoundaryName = "route_correction"
-BOUNDARY_UNRESOLVED: BoundaryName = "route_unresolved"
+BOUNDARY_EXPLORE = EXPLORE_INVENTORY
+BOUNDARY_EDIT: RouteTarget = "route_edit"
+BOUNDARY_RUN: RouteTarget = "route_run"
+BOUNDARY_CORRECTION: RouteTarget = "route_correction"
+BOUNDARY_UNRESOLVED: RouteTarget = "route_unresolved"
 
 _DEFAULT_BUDGET = ExecutionBudget(
-    max_llm_calls=0,
-    max_tool_calls=0,
+    max_llm_calls=2,
+    max_tool_calls=64,
     max_repair_attempts=0,
     max_shell_execution_seconds=0,
 )
@@ -47,7 +70,10 @@ _DEFAULT_COUNTERS: ExecutionCounters = {
 def build_graph(
     default_execution_budget: ExecutionBudget | None = None,
 ) -> CompiledStateGraph[
-    OrchestrationState, None, OrchestrationState, OrchestrationState
+    OrchestrationState,
+    OrchestrationContext,
+    OrchestrationState,
+    OrchestrationState,
 ]:
     """Build a fresh, inspectable graph; no graph singleton or side effects."""
 
@@ -79,6 +105,7 @@ def build_graph(
             "trajectory": None,
             "routing_decision": None,
             "failure": None,
+            "explore": {},
             "current_node": INITIALIZE,
         }
 
@@ -92,9 +119,9 @@ def build_graph(
 
     def choose_boundary(
         state: OrchestrationState,
-    ) -> BoundaryName:
-        routes: dict[str | None, BoundaryName] = {
-            Trajectory.EXPLORE.value: BOUNDARY_EXPLORE,
+    ) -> RouteTarget:
+        routes: dict[str | None, RouteTarget] = {
+            Trajectory.EXPLORE.value: cast(RouteTarget, EXPLORE_INVENTORY),
             Trajectory.EDIT.value: BOUNDARY_EDIT,
             Trajectory.RUN.value: BOUNDARY_RUN,
             Trajectory.CORRECTION.value: BOUNDARY_CORRECTION,
@@ -103,13 +130,23 @@ def build_graph(
         return routes[state.get("trajectory")]
 
     builder = StateGraph[
-        OrchestrationState, None, OrchestrationState, OrchestrationState
-    ](OrchestrationState)
+        OrchestrationState,
+        OrchestrationContext,
+        OrchestrationState,
+        OrchestrationState,
+    ](OrchestrationState, context_schema=OrchestrationContext)
     builder.add_node(INITIALIZE, initialize)
     builder.add_node(ROUTE, route)
     # LangGraph's current overload cannot infer the state type for these
     # module-level boundary callables, so keep the cast at this integration edge.
-    builder.add_node(BOUNDARY_EXPLORE, cast(Any, route_explore))
+    builder.add_node(EXPLORE_INVENTORY, cast(Any, inventory))
+    builder.add_node(EXPLORE_PLAN, cast(Any, plan))
+    builder.add_node(EXPLORE_SELECT, cast(Any, select))
+    builder.add_node(EXPLORE_READ, cast(Any, read))
+    builder.add_node(EXPLORE_EXPLAIN, cast(Any, explain))
+    builder.add_node(EXPLORE_ANSWER_INVENTORY, answer_inventory)
+    builder.add_node(EXPLORE_ANSWER_ZERO, answer_zero)
+    builder.add_node(EXPLORE_FAILED, failed)
     builder.add_node(BOUNDARY_EDIT, cast(Any, route_edit))
     builder.add_node(BOUNDARY_RUN, cast(Any, route_run))
     builder.add_node(BOUNDARY_CORRECTION, cast(Any, route_correction))
@@ -120,15 +157,45 @@ def build_graph(
         ROUTE,
         choose_boundary,
         {
-            BOUNDARY_EXPLORE: BOUNDARY_EXPLORE,
+            EXPLORE_INVENTORY: EXPLORE_INVENTORY,
             BOUNDARY_EDIT: BOUNDARY_EDIT,
             BOUNDARY_RUN: BOUNDARY_RUN,
             BOUNDARY_CORRECTION: BOUNDARY_CORRECTION,
             BOUNDARY_UNRESOLVED: BOUNDARY_UNRESOLVED,
         },
     )
+    builder.add_conditional_edges(
+        EXPLORE_INVENTORY,
+        inventory_next,
+        {EXPLORE_PLAN: EXPLORE_PLAN, EXPLORE_FAILED: EXPLORE_FAILED},
+    )
+    builder.add_conditional_edges(
+        EXPLORE_PLAN,
+        plan_next,
+        {
+            EXPLORE_ANSWER_INVENTORY: EXPLORE_ANSWER_INVENTORY,
+            EXPLORE_SELECT: EXPLORE_SELECT,
+        },
+    )
+    builder.add_conditional_edges(
+        EXPLORE_SELECT,
+        select_next,
+        {
+            EXPLORE_FAILED: EXPLORE_FAILED,
+            EXPLORE_ANSWER_ZERO: EXPLORE_ANSWER_ZERO,
+            EXPLORE_READ: EXPLORE_READ,
+        },
+    )
+    builder.add_conditional_edges(
+        EXPLORE_READ,
+        read_next,
+        {EXPLORE_FAILED: EXPLORE_FAILED, EXPLORE_EXPLAIN: EXPLORE_EXPLAIN},
+    )
     for name in (
-        BOUNDARY_EXPLORE,
+        EXPLORE_ANSWER_INVENTORY,
+        EXPLORE_ANSWER_ZERO,
+        EXPLORE_EXPLAIN,
+        EXPLORE_FAILED,
         BOUNDARY_EDIT,
         BOUNDARY_RUN,
         BOUNDARY_CORRECTION,
