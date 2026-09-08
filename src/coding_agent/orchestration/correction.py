@@ -294,6 +294,13 @@ def complete(
         outcome="succeeded",
         summary="reverted the previous edit",
     )
+    if runtime.context is not None:
+        runtime.context.trace.emit(
+            "correction.completed",
+            node=CORRECTION_COMPLETE,
+            operation_id=record.operation_id,
+            outcome="succeeded",
+        )
     return {
         "correction": {
             **_correction(state),
@@ -338,6 +345,12 @@ def failed(
         outcome="failed",
         summary=f"undo failed: {failure.get('code', 'unknown')}",
     )
+    if runtime.context is not None:
+        runtime.context.trace.emit(
+            "trajectory.failed",
+            node=CORRECTION_FAILED,
+            outcome="failed",
+        )
     return {
         "correction": {**_correction(state), "answer": answer},
         "current_node": CORRECTION_FAILED,

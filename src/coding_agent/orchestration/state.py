@@ -91,6 +91,7 @@ class EditState(TypedDict, total=False):
     last_repair_fingerprint: str
     active_preferences: list[str]
     recent_session_events: list[JsonValue]
+    dry_run: bool
 
 
 class OrchestrationState(TypedDict, total=False):
@@ -109,3 +110,5 @@ class OrchestrationState(TypedDict, total=False):
     edit: EditState
     correction: CorrectionState
     memory: dict[str, JsonValue]
+    dry_run: bool
+    trace_id: str

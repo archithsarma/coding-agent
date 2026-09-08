@@ -15,6 +15,7 @@ from coding_agent.domain import ToolRequest, ToolResult
 from coding_agent.memory import SessionEvent
 from coding_agent.model import (
     ModelError,
+    ModelNotConfiguredError,
     ModelProviderError,
     ModelStructuredOutputError,
     ModelTimeoutError,
@@ -290,6 +291,7 @@ def answer_inventory(
         outcome="succeeded",
         summary=f"inspected {len(explore['inventory'])} inventory entries",
     )
+    _trace_terminal(runtime, EXPLORE_ANSWER_INVENTORY, "succeeded")
     return {
         "explore": {**explore, "answer": answer, "file_contents": []},
         "current_node": EXPLORE_ANSWER_INVENTORY,
@@ -393,6 +395,7 @@ def answer_zero(
         outcome="succeeded",
         summary="no relevant files were selected",
     )
+    _trace_terminal(runtime, EXPLORE_ANSWER_ZERO, "succeeded")
     return {
         "explore": {
             **_explore(state),
@@ -508,6 +511,7 @@ async def explain(
         outcome="succeeded",
         summary="answered a code question from inspected files",
     )
+    _trace_terminal(runtime, EXPLORE_EXPLAIN, "succeeded")
     return {
         "counters": state["counters"],
         "explore": {**explore, "answer": result.text, "file_contents": []},
@@ -528,6 +532,7 @@ def failed(
         outcome="failed",
         summary=(f"explore failed: {failure_code}"),
     )
+    _trace_terminal(runtime, EXPLORE_FAILED, "failed")
     return {
         "explore": {**_explore(state), "file_contents": []},
         "current_node": EXPLORE_FAILED,
@@ -549,7 +554,9 @@ def _tool_failure(
 def _model_failure(
     state: OrchestrationState, error: ModelError, node: str
 ) -> dict[str, object]:
-    if isinstance(error, ModelTimeoutError):
+    if isinstance(error, ModelNotConfiguredError):
+        code = "model_not_configured"
+    elif isinstance(error, ModelTimeoutError):
         code = "model_timeout"
     elif isinstance(error, ModelStructuredOutputError):
         code = "model_structured_output_failure"
@@ -580,3 +587,14 @@ def _record_session_event(
             outcome=outcome,
         )
     )
+
+
+def _trace_terminal(
+    runtime: Runtime[OrchestrationContext], node: str, outcome: str
+) -> None:
+    if runtime.context is not None:
+        runtime.context.trace.emit(
+            "trajectory.completed" if outcome == "succeeded" else "trajectory.failed",
+            node=node,
+            outcome=outcome,
+        )

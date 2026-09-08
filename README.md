@@ -21,7 +21,21 @@ uv sync
 ```bash
 uv run coding-agent health
 uv run coding-agent version
+uv run coding-agent chat --workspace ./demo
+uv run coding-agent run "run tests" --workspace ./demo
 ```
+
+The CLI keeps one session runtime across interactive turns, including its
+session memory and Undo journal. `run` is the same single-turn graph path used
+by `chat`. Use `--dry-run` with either command to plan an Edit and show its
+bounded diff without writing files or running verification. Use
+`--trace-file ./agent-trace.jsonl` to write bounded JSONL execution events;
+trace output should be kept outside the target workspace for normal use.
+
+Set `OPENAI_API_KEY` (and optionally `OPENAI_MODEL`) for Explore explanations,
+Edit planning, repair, and ambiguous-request routing. Deterministic Run and
+Correction requests remain available without a configured model and model
+requests fail clearly with `model_not_configured`.
 
 The filesystem integration launches `npx -y @modelcontextprotocol/server-filesystem
 <workspace-root>` with a single configured workspace. Filesystem tools are

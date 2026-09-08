@@ -2,6 +2,7 @@
 
 from coding_agent.model.errors import (
     ModelError,
+    ModelNotConfiguredError,
     ModelProviderError,
     ModelStructuredOutputError,
     ModelTimeoutError,
@@ -17,6 +18,7 @@ from coding_agent.model.settings import OpenAIModelConfig
 __all__ = [
     "ModelClient",
     "ModelError",
+    "ModelNotConfiguredError",
     "ModelProviderError",
     "ModelStructuredOutputError",
     "ModelTimeoutError",

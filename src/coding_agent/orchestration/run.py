@@ -205,6 +205,11 @@ def complete(
         summary=f"ran {verification.kind.value}",
         verification_status="passed" if verification.passed else "failed",
     )
+    _trace_terminal(
+        runtime,
+        RUN_COMPLETE,
+        "succeeded" if verification.passed else "failed",
+    )
     return {
         "run": {**_run(state), "answer": user_facing_summary(verification)},
         "current_node": RUN_COMPLETE,
@@ -225,6 +230,7 @@ def failed(
         outcome="failed",
         summary=f"run failed: {failure_code}",
     )
+    _trace_terminal(runtime, RUN_FAILED, "failed")
     return {
         "run": {**_run(state), "answer": f"Run failed: {message}", "tool_result": None},
         "current_node": RUN_FAILED,
@@ -258,3 +264,14 @@ def _record_session_event(
             verification_status=verification_status,
         )
     )
+
+
+def _trace_terminal(
+    runtime: Runtime[OrchestrationContext], node: str, outcome: str
+) -> None:
+    if runtime.context is not None:
+        runtime.context.trace.emit(
+            "trajectory.completed" if outcome == "succeeded" else "trajectory.failed",
+            node=node,
+            outcome=outcome,
+        )

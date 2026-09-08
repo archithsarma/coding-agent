@@ -37,6 +37,7 @@ from coding_agent.journal import ReversibleFile, ReversibleOperation
 from coding_agent.memory import PreferencePersistenceError, SessionEvent
 from coding_agent.model import (
     ModelError,
+    ModelNotConfiguredError,
     ModelProviderError,
     ModelStructuredOutputError,
     ModelTimeoutError,
@@ -46,6 +47,7 @@ from coding_agent.orchestration.explore import inventory as explore_inventory
 from coding_agent.orchestration.explore import read as explore_read
 from coding_agent.orchestration.state import (
     EditState,
+    ExploreFile,
     OrchestrationState,
 )
 from coding_agent.orchestration.verification import (
@@ -66,6 +68,7 @@ EDIT_REPAIR_PLAN = "edit_repair_plan"
 EDIT_REPAIR_PREPARE = "edit_repair_prepare"
 EDIT_REPAIR_COMMIT = "edit_repair_commit"
 EDIT_COMPLETE = "edit_complete"
+EDIT_DRY_RUN_COMPLETE = "edit_dry_run_complete"
 EDIT_FAILED = "edit_failed"
 
 SELECTOR_INSTRUCTIONS = (
@@ -223,7 +226,9 @@ def _increment_model_counter(state: OrchestrationState) -> dict[str, object] | N
 def _model_failure(
     state: OrchestrationState, error: ModelError, node: str
 ) -> dict[str, object]:
-    if isinstance(error, ModelTimeoutError):
+    if isinstance(error, ModelNotConfiguredError):
+        code = "model_not_configured"
+    elif isinstance(error, ModelTimeoutError):
         code = "model_timeout"
     elif isinstance(error, ModelStructuredOutputError):
         code = "model_structured_output_failure"
@@ -487,7 +492,49 @@ def prepare(
 
 
 def prepare_next(state: OrchestrationState) -> str:
-    return EDIT_FAILED if state.get("failure") else EDIT_COMMIT
+    if state.get("failure"):
+        return EDIT_FAILED
+    return EDIT_DRY_RUN_COMPLETE if state.get("dry_run") else EDIT_COMMIT
+
+
+def dry_run_complete(
+    state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+) -> dict[str, object]:
+    """Finish after deterministic validation without mutation or verification."""
+
+    edit = _edit(state)
+    candidate_files = cast(
+        list[ExploreFile],
+        _apply_plans_to_sources(edit.get("source_files", []), _plans_from_state(edit)),
+    )
+    changes = _logical_file_changes({**edit, "current_files": candidate_files})
+    _record_session_event(
+        runtime,
+        files=tuple(change.path for change in changes),
+        operation_id=None,
+        outcome="dry_run",
+        verification_status=None,
+        summary=f"prepared dry-run edit for {len(changes)} file(s)",
+    )
+    if runtime.context is not None:
+        runtime.context.trace.emit(
+            "trajectory.completed",
+            node=EDIT_DRY_RUN_COMPLETE,
+            outcome="dry_run",
+        )
+    return {
+        "edit": {
+            **edit,
+            "file_changes": [change.model_dump(mode="json") for change in changes],
+            "answer": _dry_run_answer(changes),
+            "source_files": [],
+            "baseline_files": [],
+            "current_files": [],
+            "snapshots": [],
+            "plans": [],
+        },
+        "current_node": EDIT_DRY_RUN_COMPLETE,
+    }
 
 
 async def commit(
@@ -636,6 +683,16 @@ async def verify(
             message=str(error),
             node=EDIT_VERIFY,
         ) | {"counters": counters}
+    if context.trace is not None:
+        context.trace.emit(
+            "verification.completed",
+            node=EDIT_VERIFY,
+            outcome="passed" if verification.passed else "failed",
+            metadata={
+                "kind": verification.kind.value,
+                "exit_code": verification.exit_code,
+            },
+        )
     history = [
         *edit.get("verification_history", []),
         verification.model_dump(mode="json"),
@@ -720,6 +777,11 @@ async def repair_plan(
         "llm_calls": state["counters"]["llm_calls"] + 1,
         "repair_attempts": attempts + 1,
     }
+    context.trace.emit(
+        "repair.started",
+        node=EDIT_REPAIR_PLAN,
+        metadata={"attempt": attempts + 1},
+    )
     failed = edit.get("failed_verification")
     repair_input = json.dumps(
         {
@@ -751,6 +813,12 @@ async def repair_plan(
             EDIT_REPAIR_PLAN,
         )
     if not output.can_repair:
+        context.trace.emit(
+            "repair.completed",
+            node=EDIT_REPAIR_PLAN,
+            outcome="no_safe_repair",
+            metadata={"attempt": attempts + 1},
+        )
         return _failure(
             cast(OrchestrationState, {**state, "counters": counters}),
             code="no_safe_repair",
@@ -761,12 +829,24 @@ async def repair_plan(
         plans = _to_domain_plans(EditPlanOutput(files=output.files))
         _validate_repair_plans(plans, edit)
     except (InvalidRequestError, ValueError, ValidationError) as error:
+        context.trace.emit(
+            "repair.completed",
+            node=EDIT_REPAIR_PLAN,
+            outcome="invalid",
+            metadata={"attempt": attempts + 1},
+        )
         return _failure(
             cast(OrchestrationState, {**state, "counters": counters}),
             code="invalid_repair_plan",
             message=str(error),
             node=EDIT_REPAIR_PLAN,
         ) | {"counters": counters}
+    context.trace.emit(
+        "repair.completed",
+        node=EDIT_REPAIR_PLAN,
+        outcome="succeeded",
+        metadata={"attempt": attempts + 1},
+    )
     return {
         "counters": counters,
         "edit": {
@@ -932,6 +1012,13 @@ def complete(
         verification_status="passed",
         summary=f"edited {len(changes)} file(s)",
     )
+    if runtime.context is not None:
+        runtime.context.trace.emit(
+            "edit.committed",
+            node=EDIT_COMPLETE,
+            operation_id=record.operation_id,
+            outcome="succeeded",
+        )
     return {
         "edit": {
             **edit,
@@ -963,7 +1050,9 @@ def failed(
         _verification_results(_edit(state)),
         OperationStatus.FAILED,
     )
-    if not (isinstance(details, dict) and details.get("partial_mutation_risk")):
+    if not state.get("dry_run") and not (
+        isinstance(details, dict) and details.get("partial_mutation_risk")
+    ):
         _journal_edit(runtime, _edit(state), record)
     _record_session_event(
         runtime,
@@ -973,6 +1062,14 @@ def failed(
         verification_status="failed",
         summary=f"edit failed: {code}",
     )
+    if runtime.context is not None:
+        runtime.context.trace.emit(
+            "trajectory.failed",
+            node=EDIT_FAILED,
+            operation_id=record.operation_id,
+            outcome="failed",
+            metadata={"code": code},
+        )
     if code == "repair_attempts_exhausted":
         answer = (
             f"The edit was applied, but verification still fails after "
@@ -1225,6 +1322,14 @@ def _success_answer(
     return prefix
 
 
+def _dry_run_answer(changes: list[FileChange]) -> str:
+    if not changes:
+        return "Dry run produced no file changes."
+    return "Dry run only; no files were changed.\n\n" + "\n".join(
+        change.patch or "" for change in changes
+    )
+
+
 def _journal_edit(
     runtime: Runtime[OrchestrationContext],
     edit: EditState,
@@ -1280,9 +1385,9 @@ def _record_session_event(
     runtime: Runtime[OrchestrationContext],
     *,
     files: tuple[str, ...],
-    operation_id: str,
+    operation_id: str | None,
     outcome: str,
-    verification_status: str,
+    verification_status: str | None,
     summary: str,
 ) -> None:
     if runtime.context is None:

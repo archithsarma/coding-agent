@@ -268,13 +268,15 @@ async def run_edit(
     preference_store=None,
     session_id="test-session",
     user_request="add title validation",
+    dry_run=False,
 ):
     return await build_graph(
         budget(
             max_tool_calls=max_tool_calls,
             max_llm_calls=max_llm_calls,
             max_repair_attempts=max_repair_attempts,
-        )
+        ),
+        dry_run=dry_run,
     ).ainvoke(
         {"task_id": "task-1", "user_request": user_request},
         context=OrchestrationContext(
@@ -381,6 +383,35 @@ async def test_edit_records_compact_session_event(tmp_path: Path):
     assert len(events) == 1
     assert events[0].files == ("routes/tasks.py",)
     assert "def task" not in events[0].summary
+
+
+@pytest.mark.anyio
+async def test_edit_dry_run_does_not_write_verify_or_journal(tmp_path: Path):
+    filesystem = FakeFilesystem({"routes/tasks.py": "def task():\n    return []\n"})
+    model = EditModel()
+    session_memory = InMemorySessionMemory()
+    result = await run_edit(
+        tmp_path,
+        filesystem,
+        model,
+        max_tool_calls=9,
+        session_memory=session_memory,
+        dry_run=True,
+    )
+
+    assert result["current_node"] == "edit_dry_run_complete"
+    assert filesystem.contents["routes/tasks.py"] == "def task():\n    return []\n"
+    assert not [
+        call for call in filesystem.calls if call.capability == "filesystem.write"
+    ]
+    assert not [call for call in filesystem.calls if call.capability == "shell.execute"]
+    assert result["counters"] == {
+        "llm_calls": 2,
+        "tool_calls": 3,
+        "repair_attempts": 0,
+    }
+    assert "Dry run only" in result["edit"]["answer"]
+    assert "operation_record" not in result["edit"]
 
 
 @pytest.mark.anyio

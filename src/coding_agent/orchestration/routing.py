@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
 
 from coding_agent.domain import Trajectory
 from coding_agent.orchestration.state import RoutingDecision
@@ -30,6 +33,12 @@ _EXPLORE_EXACT = {
     "show me the project structure",
 }
 _EDIT_PREFIXES = ("add ", "change ", "fix ", "update ", "remove ", "rename ")
+
+
+class RoutingSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trajectory: Literal["explore", "edit", "run", "correction", "unresolved"]
 
 
 def normalize_request(request: str) -> str:

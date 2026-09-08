@@ -13,10 +13,12 @@ import coding_agent.orchestration.correction as correction_nodes
 import coding_agent.orchestration.run as run_nodes
 from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
 from coding_agent.memory import PreferencePersistenceError, capture_explicit_preference
+from coding_agent.model import ModelError
 from coding_agent.orchestration.context import OrchestrationContext
 from coding_agent.orchestration.edit import (
     EDIT_COMMIT,
     EDIT_COMPLETE,
+    EDIT_DRY_RUN_COMPLETE,
     EDIT_FAILED,
     EDIT_INVENTORY,
     EDIT_PLAN,
@@ -42,6 +44,9 @@ from coding_agent.orchestration.edit import (
 )
 from coding_agent.orchestration.edit import (
     complete as edit_complete,
+)
+from coding_agent.orchestration.edit import (
+    dry_run_complete as edit_dry_run_complete,
 )
 from coding_agent.orchestration.edit import (
     failed as edit_failed,
@@ -104,7 +109,7 @@ from coding_agent.orchestration.explore import (
     select,
     select_next,
 )
-from coding_agent.orchestration.routing import route_request
+from coding_agent.orchestration.routing import RoutingSelection, route_request
 from coding_agent.orchestration.run import (
     RUN_COMPLETE,
     RUN_EXECUTE,
@@ -153,6 +158,8 @@ _DEFAULT_COUNTERS: ExecutionCounters = {
 
 def build_graph(
     default_execution_budget: ExecutionBudget | None = None,
+    *,
+    dry_run: bool = False,
 ) -> CompiledStateGraph[
     OrchestrationState,
     OrchestrationContext,
@@ -184,7 +191,14 @@ def build_graph(
         if not _valid_counters(counters):
             raise InvalidRequestError("counters must contain non-negative integers")
         memory: dict[str, object] = {}
+        trace_id = ""
         if runtime.context is not None:
+            trace_id = runtime.context.trace.begin_turn()
+            runtime.context.trace.emit(
+                "request.received",
+                node=INITIALIZE,
+                metadata={"request_length": len(user_request)},
+            )
             candidate = capture_explicit_preference(user_request)
             if candidate is not None:
                 try:
@@ -223,12 +237,61 @@ def build_graph(
             "run": {},
             "edit": {},
             "memory": memory,
+            "dry_run": dry_run,
+            "trace_id": trace_id,
             "current_node": INITIALIZE,
         }
 
-    def route(state: OrchestrationState) -> dict[str, object]:
+    async def route(
+        state: OrchestrationState, runtime: Runtime[OrchestrationContext]
+    ) -> dict[str, object]:
         decision = route_request(state["user_request"])
+        counters = state["counters"]
+        context = runtime.context
+        if (
+            decision.trajectory is None
+            and not state.get("memory", {}).get("preference_saved")
+            and context is not None
+        ):
+            if counters["llm_calls"] < state["execution_budget"]["max_llm_calls"]:
+                try:
+                    raw_fallback = await context.model.generate_structured(
+                        instructions=(
+                            "Choose only the best trajectory for this request. "
+                            "Do not infer tools, commands, files, or arguments."
+                        ),
+                        input=state["user_request"],
+                        output_type=RoutingSelection,
+                    )
+                    fallback = RoutingSelection.model_validate(raw_fallback)
+                except (ModelError, ValidationError):
+                    fallback = None
+                counters = {
+                    **counters,
+                    "llm_calls": counters["llm_calls"] + 1,
+                }
+                if fallback is not None and fallback.trajectory != "unresolved":
+                    decision = decision.model_copy(
+                        update={
+                            "trajectory": Trajectory(fallback.trajectory),
+                            "source": "model",
+                            "reason": "ambiguous-request model fallback",
+                        }
+                    )
+        if context is not None:
+            context.trace.trajectory = (
+                decision.trajectory.value if decision.trajectory else None
+            )
+            context.trace.emit(
+                "route.selected",
+                node=ROUTE,
+                outcome=(
+                    decision.trajectory.value if decision.trajectory else "unresolved"
+                ),
+                metadata={"source": decision.source},
+            )
         return {
+            "counters": counters,
             "routing_decision": decision.model_dump(mode="json"),
             "trajectory": decision.trajectory.value if decision.trajectory else None,
             "current_node": ROUTE,
@@ -275,6 +338,7 @@ def build_graph(
     builder.add_node(EDIT_REPAIR_PREPARE, repair_prepare)
     builder.add_node(EDIT_REPAIR_COMMIT, cast(Any, repair_commit))
     builder.add_node(EDIT_COMPLETE, edit_complete)
+    builder.add_node(EDIT_DRY_RUN_COMPLETE, edit_dry_run_complete)
     builder.add_node(EDIT_FAILED, edit_failed)
     builder.add_node(RUN_PLAN, run_nodes.plan)
     builder.add_node(RUN_EXECUTE, cast(Any, execute))
@@ -352,7 +416,11 @@ def build_graph(
     builder.add_conditional_edges(
         EDIT_PREPARE,
         edit_prepare_next,
-        {EDIT_FAILED: EDIT_FAILED, EDIT_COMMIT: EDIT_COMMIT},
+        {
+            EDIT_FAILED: EDIT_FAILED,
+            EDIT_COMMIT: EDIT_COMMIT,
+            EDIT_DRY_RUN_COMPLETE: EDIT_DRY_RUN_COMPLETE,
+        },
     )
     builder.add_conditional_edges(
         EDIT_COMMIT,
@@ -442,6 +510,7 @@ def build_graph(
         RUN_COMPLETE,
         RUN_FAILED,
         EDIT_COMPLETE,
+        EDIT_DRY_RUN_COMPLETE,
         EDIT_FAILED,
         correction_nodes.CORRECTION_COMPLETE,
         correction_nodes.CORRECTION_FAILED,

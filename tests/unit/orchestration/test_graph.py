@@ -2,11 +2,14 @@ import pytest
 
 from coding_agent.domain import ExecutionBudget, InvalidRequestError, Trajectory
 from coding_agent.memory import SQLitePreferenceStore
+from coding_agent.model import TextGenerationResult
 from coding_agent.orchestration.context import OrchestrationContext
 from coding_agent.orchestration.graph import (
     BOUNDARY_UNRESOLVED,
     build_graph,
 )
+from coding_agent.orchestration.routing import RoutingSelection
+from coding_agent.tools import ToolRegistry, ToolRuntime
 
 
 @pytest.mark.parametrize(
@@ -86,3 +89,49 @@ async def test_explicit_remember_request_persists_without_new_trajectory(
     assert result["current_node"] == BOUNDARY_UNRESOLVED
     assert result["memory"]["preference_saved"] is True
     assert store.list_preferences()[0].value == "always use type hints."
+
+
+class RoutingModel:
+    def __init__(self, trajectory: str) -> None:
+        self.trajectory = trajectory
+        self.structured_calls = 0
+
+    async def generate_structured(self, *, output_type, **_kwargs):
+        self.structured_calls += 1
+        assert output_type is RoutingSelection
+        return RoutingSelection(trajectory=self.trajectory)
+
+    async def generate_text(self, **_kwargs) -> TextGenerationResult:
+        raise AssertionError("routing fallback must not use text generation")
+
+
+@pytest.mark.anyio
+async def test_ambiguous_request_uses_one_safe_model_fallback() -> None:
+    model = RoutingModel("unresolved")
+    result = await build_graph().ainvoke(
+        {"task_id": "task-1", "user_request": "please deal with this failure"},
+        context=OrchestrationContext(
+            model=model,
+            tools=ToolRuntime(ToolRegistry()),
+        ),
+    )
+
+    assert result["current_node"] == BOUNDARY_UNRESOLVED
+    assert result["counters"]["llm_calls"] == 1
+    assert model.structured_calls == 1
+
+
+@pytest.mark.anyio
+async def test_clear_run_request_does_not_use_routing_model() -> None:
+    model = RoutingModel("unresolved")
+    result = await build_graph().ainvoke(
+        {"task_id": "task-1", "user_request": "run tests"},
+        context=OrchestrationContext(
+            model=model,
+            tools=ToolRuntime(ToolRegistry()),
+        ),
+    )
+
+    assert result["trajectory"] == "run"
+    assert result["counters"]["llm_calls"] == 0
+    assert model.structured_calls == 0

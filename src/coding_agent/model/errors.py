@@ -9,6 +9,10 @@ class ModelProviderError(ModelError):
     """The configured provider rejected or could not complete a request."""
 
 
+class ModelNotConfiguredError(ModelError):
+    """No model credentials are available for a model-required trajectory."""
+
+
 class ModelTimeoutError(ModelError):
     """The provider request exceeded its configured timeout."""
 
